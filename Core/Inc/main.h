@@ -66,7 +66,11 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+void CAN1_RX0_IRQHandler();
+void TIM7_IRQHandler();
+void DMA1_Stream6_IRQHandler();
+void DMA2_Stream2_IRQHandler();
+void DMA2_Stream3_IRQHandler();
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
