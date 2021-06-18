@@ -113,9 +113,14 @@ inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd)
         break;
     case Position:
         can_command[0] = 0xa4;
-        *reinterpret_cast<uint16_t*>(&can_command[2]) = 250; // set max speed to 250deg per sec
+        *reinterpret_cast<uint16_t*>(&can_command[2]) = 500; // set max speed to 500deg per sec (shaft, output = 83.33deg/s)
         std::memcpy(&param, cmd->Param.data(), 8);
         *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(param*180.0*100.0*6.0/3.14159265358);
+        break;
+    case Velocity:
+        can_command[0] = 0xa2;
+        std::memcpy(&param, cmd->Param.data(), 8);
+        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(param);
         break;
     case Torque:
         can_command[0] = 0xa1;
@@ -219,7 +224,7 @@ void TIM7_Init()
     NVIC_SetPriority(TIM7_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 12, 0));
     TIM7->CR1 = 0;
     TIM7->DIER = 1; // Enable update interrupt
-    TIM7->PSC = 4-1;
+    TIM7->PSC = 500-1;
     TIM7->ARR = 45000-1;
     TIM7->CR1 = 1;
 }
