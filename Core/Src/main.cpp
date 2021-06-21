@@ -369,9 +369,9 @@ void DMA2_Stream2_IRQHandler()
     if (!result)
         fail_count++;
     if (result) {
-        auto cmd1 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+4));
+        auto cmd3 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+4));
         auto cmd2 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+16));
-        auto cmd3 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+28));
+        auto cmd1 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+28));
         CAN1->sTxMailBox[0].TDLR = *reinterpret_cast<uint32_t*>(&cmd1[0]);
         CAN1->sTxMailBox[0].TDHR = *reinterpret_cast<uint32_t*>(&cmd1[4]);
         CAN1->sTxMailBox[1].TDLR = *reinterpret_cast<uint32_t*>(&cmd2[0]);
@@ -437,12 +437,12 @@ void CAN1_RX0_IRQHandler()
         return;
     total_rx_counts++;
     if (stdId==0x141) {
-        motor_pos_trackers[0].update(feedback->EncoderPos);
-        motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
-        motor_feedback_full.Feedbacks[0].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
-        motor_feedback_full.Feedbacks[0].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[0].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 0;
+        motor_pos_trackers[2].update(feedback->EncoderPos);
+        motor_feedback_full.Feedbacks[2].angle = motor_pos_trackers[2].get_angle_f();
+        motor_feedback_full.Feedbacks[2].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
+        motor_feedback_full.Feedbacks[2].velocity = feedback->Speed;
+        motor_feedback_full.Feedbacks[2].temperature = feedback->Temperature;
+        motor_feedback_full.status |= 0b1 << 2;
         motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[0]++;
     }
@@ -459,14 +459,14 @@ void CAN1_RX0_IRQHandler()
         CAN1->sTxMailBox[2].TIR |= CAN_TI0R_TXRQ;
     }
     else if (stdId==0x143) {
-        motor_pos_trackers[2].update(feedback->EncoderPos);
-        motor_feedback_full.Feedbacks[2].angle = motor_pos_trackers[2].get_angle_f();
-        motor_feedback_full.Feedbacks[2].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
-        motor_feedback_full.Feedbacks[2].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[2].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 2;
+        motor_pos_trackers[0].update(feedback->EncoderPos);
+        motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
+        motor_feedback_full.Feedbacks[0].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
+        motor_feedback_full.Feedbacks[0].velocity = feedback->Speed;
+        motor_feedback_full.Feedbacks[0].temperature = feedback->Temperature;
+        motor_feedback_full.status |= 0b1 << 0;
         motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
-        motor_rx_counts[2]++;
+        motor_rx_counts[0]++;
     }
     if (total_rx_counts%500==0) {
         logger.log("Total rx count: %d, 1: %d, 2: %d, 3: %d\n", total_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
