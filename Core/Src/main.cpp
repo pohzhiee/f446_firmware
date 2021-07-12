@@ -245,6 +245,7 @@ void USART2_Init()
     LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     // Enable transmitter
+    // 500,000 baud
     USART2->BRR = 5 << 4 | 10;
     USART2->CR1 = USART_CR1_TE;
     USART2->CR2 = 0;
@@ -383,14 +384,27 @@ void DMA2_Stream2_IRQHandler()
             // see CAN_Rx interrupt for 0x143 transmit
             CAN1->sTxMailBox[0].TIR |= CAN_TI0R_TXRQ;
             CAN1->sTxMailBox[1].TIR |= CAN_TI0R_TXRQ;
+            LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
         }
         else{
             logger.log("CAN TSR busy\n");
         }
         if (rx_count%100==0) {
-            logger.log("Cmd1: %x, val: %ld\n", cmd1[0], *reinterpret_cast<int32_t*>(&cmd1[4]));
-            logger.log("Cmd2: %x, val: %ld\n", cmd2[0], *reinterpret_cast<int32_t*>(&cmd2[4]));
-            logger.log("Cmd3: %x, val: %ld\n", cmd3[0], *reinterpret_cast<int32_t*>(&cmd3[4]));
+            if(cmd1[0] == 0xa4 || cmd1[0] == 0xa2){
+                logger.log("Cmd1: %x, val: %ld\n", cmd1[0], *reinterpret_cast<int32_t*>(&cmd1[4]));
+                logger.log("Cmd2: %x, val: %ld\n", cmd2[0], *reinterpret_cast<int32_t*>(&cmd2[4]));
+                logger.log("Cmd3: %x, val: %ld\n", cmd3[0], *reinterpret_cast<int32_t*>(&cmd3[4]));
+            }
+            else if(cmd1[0] == 0xa1){
+                std::array<double, 3> params{-0.1,-0.1,-0.1};
+                std::memcpy(&params[0], reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+4)->Param.data(), 8);
+                std::memcpy(&params[1], reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+16)->Param.data(), 8);
+                std::memcpy(&params[2], reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+28)->Param.data(), 8);
+                logger.log("Cmd1: %x, val: %d, raw: %f\n", cmd1[0], *reinterpret_cast<int16_t*>(&cmd1[4]), params[0]);
+
+                logger.log("Cmd2: %x, val: %d, raw: %f\n", cmd2[0], *reinterpret_cast<int16_t*>(&cmd2[4]), params[1]);
+                logger.log("Cmd3: %x, val: %d, raw: %f\n", cmd3[0], *reinterpret_cast<int16_t*>(&cmd3[4]), params[2]);
+            }
         }
     }
     // Re-enable the DMA (data pointer and length will be reset to whatever that is there previously)
@@ -436,20 +450,20 @@ void CAN1_RX0_IRQHandler()
     if (data[0]!=0x9c && ((data[0] < 0xa1) || (data[0] > 0xa4)))
         return;
     total_rx_counts++;
-    if (stdId==0x141) {
-        motor_pos_trackers[2].update(feedback->EncoderPos);
-        motor_feedback_full.Feedbacks[2].angle = motor_pos_trackers[2].get_angle_f();
-        motor_feedback_full.Feedbacks[2].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
-        motor_feedback_full.Feedbacks[2].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[2].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 2;
+    if (stdId==0x143) {
+        motor_pos_trackers[0].update(feedback->EncoderPos);
+        motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
+        motor_feedback_full.Feedbacks[0].torque = (float)feedback->TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[0].velocity = feedback->Speed;
+        motor_feedback_full.Feedbacks[0].temperature = feedback->Temperature;
+        motor_feedback_full.status |= 0b1 << 0;
         motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[0]++;
     }
     else if (stdId==0x142) {
         motor_pos_trackers[1].update(feedback->EncoderPos);
         motor_feedback_full.Feedbacks[1].angle = motor_pos_trackers[1].get_angle_f();
-        motor_feedback_full.Feedbacks[1].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
+        motor_feedback_full.Feedbacks[1].torque = (float)feedback->TorqueCurrentRaw/2048.0f*33.0f;
         motor_feedback_full.Feedbacks[1].velocity = feedback->Speed;
         motor_feedback_full.Feedbacks[1].temperature = feedback->Temperature;
         motor_feedback_full.status |= 0b1 << 1;
@@ -458,15 +472,15 @@ void CAN1_RX0_IRQHandler()
         // we only transmit 0x143 after 0x142 is received to prevent missing message
         CAN1->sTxMailBox[2].TIR |= CAN_TI0R_TXRQ;
     }
-    else if (stdId==0x143) {
-        motor_pos_trackers[0].update(feedback->EncoderPos);
-        motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
-        motor_feedback_full.Feedbacks[0].torque = (float)feedback->TorqueCurrentRaw*2048.0f/33.0f;
-        motor_feedback_full.Feedbacks[0].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[0].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 0;
+    else if (stdId==0x141) {
+        motor_pos_trackers[2].update(feedback->EncoderPos);
+        motor_feedback_full.Feedbacks[2].angle = motor_pos_trackers[2].get_angle_f();
+        motor_feedback_full.Feedbacks[2].torque = (float)feedback->TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[2].velocity = feedback->Speed;
+        motor_feedback_full.Feedbacks[2].temperature = feedback->Temperature;
+        motor_feedback_full.status |= 0b1 << 2;
         motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
-        motor_rx_counts[0]++;
+        motor_rx_counts[2]++;
     }
     if (total_rx_counts%500==0) {
         logger.log("Total rx count: %d, 1: %d, 2: %d, 3: %d\n", total_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
@@ -478,7 +492,7 @@ void CAN1_RX0_IRQHandler()
     }
 }
 
-// USART1 TX DMA Stream
+// USART2 TX DMA Stream
 void DMA1_Stream6_IRQHandler()
 {
     // Clear all the flags
@@ -499,7 +513,7 @@ void TIM7_IRQHandler()
 {
     if (READ_BIT(TIM7->SR, TIM_SR_UIF)) {
         CLEAR_BIT(TIM7->SR, TIM_SR_UIF);
-        LL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
+//        LL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
     }
 }
 /* IRQ Handlers End */
@@ -577,7 +591,7 @@ int main(void)
             DMA1_Stream6->CR |= DMA_SxCR_EN;
             USART2->CR3 |= USART_CR3_DMAT;
         }
-        LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+        LL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
         LL_mDelay(200);
         /* USER CODE END WHILE */
 

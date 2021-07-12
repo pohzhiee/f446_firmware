@@ -21,8 +21,6 @@ public:
         next_log_buf_index_++;
         if(next_log_buf_index_ > 15)
             next_log_buf_index_ = 0;
-        if(notify_func_ptr)
-            notify_func_ptr();
     }
 
     [[nodiscard]] uint8_t get_num_unprocessed() const{
@@ -38,8 +36,6 @@ public:
             next_processed_index_ = 0;
         return buf;
     }
-    using notifyFuncPtr = void (*)();
-    notifyFuncPtr notify_func_ptr = nullptr;
     uint8_t next_log_buf_index_{0};
     uint8_t next_processed_index_{0};
     std::array<std::array<char, 150>, 16> buffer_{};
