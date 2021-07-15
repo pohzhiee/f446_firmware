@@ -1,12 +1,23 @@
 #include "main.h"
-#include "DataValidators.hpp"
 #include <array>
 #include <cstring>
 
 #include "Common.hpp"
+#include "InterfaceData.hpp"
+
+constexpr std::array<int32_t, 6> convert_joint_vals(const std::array<double, 6> joint_vals_rad)
+{
+    std::array<int32_t, 6> vals;
+    for (int i = 0; i<6; i++) {
+        vals[i] = joint_vals_rad[i]*65535.0*180.0/60.0/3.1415926535898;
+    }
+    return vals;
+}
+
+const std::array<int32_t, 6> joint_lower_limits = convert_joint_vals({-1.3, -1.3, -1.3, -1.3, -1.3});
+const std::array<int32_t, 6> joint_upper_limits = convert_joint_vals({1.3, 1.3, 1.3, 1.3, 1.3});
 
 Logger logger;
-MotorSPIInputValidator motor_spi_input_validator;
 
 std::array<uint8_t, 256> spi1_input_buffer1{};
 std::array<uint8_t, 256> spi1_output_buffer1{};
@@ -40,6 +51,11 @@ public:
     {
         return current_encoder_val_+loop_count*65535;
     }
+    [[nodiscard]] inline bool is_within_limits(int32_t lower_limit, int32_t upper_limit) const
+    {
+        const auto encoder_total = get_encoder_total();
+        return encoder_total<upper_limit && encoder_total>lower_limit;
+    }
 
     [[nodiscard]] inline float get_angle_f() const
     {
@@ -54,6 +70,7 @@ private:
 
 std::array<MotorPosTracker, 6> motor_pos_trackers;
 
+/*
 std::array<int64_t, 3> GetAngles(CAN_TypeDef* can, int fifo_num = 0)
 {
     std::array<int64_t, 3> angles{};
@@ -69,7 +86,7 @@ std::array<int64_t, 3> GetAngles(CAN_TypeDef* can, int fifo_num = 0)
     can->sTxMailBox[0].TIR |= CAN_TI0R_TXRQ;
     int num_transmit = 0;
     while (num_transmit<3) {
-        // TODO: timeout and then return an error, maybe use std::optional or something for the error
+        // TODO: timeout and then return an error
         if (can->RF0R & CAN_RF0R_FMP0_Msk) {
             num_transmit++;
             uint8_t angle_bytes[8] = {};
@@ -101,12 +118,19 @@ std::array<int64_t, 3> GetAngles(CAN_TypeDef* can, int fifo_num = 0)
         SET_BIT(can->IER, CAN_IER_FMPIE0);
     return angles;
 }
+*/
 
-inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd)
+inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd, bool within_limits)
 {
     std::array<uint8_t, 8> can_command{};
+
+    if (!within_limits) {
+        can_command[0] = 0xa1;
+        // 0 torque by default since the array is 0 initialized
+        return can_command;
+    }
     double param;
-    switch (cmd->Mode) {
+    switch (cmd->CommandMode) {
     default:
     case Read:
         can_command[0] = 0x9c;
@@ -114,23 +138,21 @@ inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd)
     case Position:
         can_command[0] = 0xa4;
         *reinterpret_cast<uint16_t*>(&can_command[2]) = 500; // set max speed to 500deg per sec (shaft, output = 83.33deg/s)
-        std::memcpy(&param, cmd->Param.data(), 8);
-        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(param*180.0*100.0*6.0/3.14159265358);
+        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(cmd->Param*180.0*100.0*6.0/3.14159265358);
         break;
     case Velocity:
         can_command[0] = 0xa2;
-        std::memcpy(&param, cmd->Param.data(), 8);
-        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(param);
+        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(cmd->Param);
         break;
     case Torque:
         can_command[0] = 0xa1;
-        std::memcpy(&param, cmd->Param.data(), 8);
-        *reinterpret_cast<int16_t*>(&can_command[4]) = static_cast<int16_t>(param*2048.0/33.0);
+        *reinterpret_cast<int16_t*>(&can_command[4]) = static_cast<int16_t>(cmd->Param*2048.0/33.0);
         break;
     }
     return can_command;
 }
 
+/* ============================ Initialisation Code Begin ===================================*/
 /**
  * The filters are configured in list mode over 2 filter banks, with 2 id being registered for each bank
  * This gives a total of 4 id's being allowed, which should correspond to a maximum of 4 distinct motors
@@ -349,66 +371,77 @@ void SPI1_RxDMA_Init()
     DMA2_Stream2->NDTR = data_length_spi;
     DMA2_Stream2->CR |= DMA_SxCR_EN;
 }
+/* ============================ Initialisation Code End ===================================*/
 
 std::array<std::array<uint8_t, 8>, 3> CAN_rx_buffer{};
 uint32_t can_rx_cmplt_count = 0;
 
-/* IRQ Handlers Begin */
-
+/* ============================ IRQ Handlers Begin ===================================*/
 uint32_t rx_count = 0;
-uint32_t fail_count = 0;
-// SPI1 RX DMA Stream
+uint32_t crc_wrong_count = 0;
+// SPI1 RX DMA Stream, triggered on end of single transmission
 void DMA2_Stream2_IRQHandler()
 {
     // Clear all the flags
     SET_BIT(DMA2->LIFCR, DMA_LIFCR_CTCIF2 | DMA_LIFCR_CHTIF2 | DMA_LIFCR_CTEIF2 | DMA_LIFCR_CFEIF2 | DMA_LIFCR_CDMEIF2);
-    bool result = motor_spi_input_validator.parse_data(std::span<uint8_t, 80>(spi1_input_buffer1.data(), 80));
+
+    // Re-enable the DMA (data pointer and length will be reset to whatever that is there previously)
+    DMA2_Stream2->CR |= DMA_SxCR_EN;
+
+    // Do some processing first before checking for tx DMA complete to give it some time
+    MotorCommandMsg cmd_message;
+    memcpy(&cmd_message, spi1_input_buffer1.data(), 80);
+    bool crc_correct = cmd_message.CheckCRC();
+    auto cmd_type = cmd_message.CommandType;
+    bool correct_command = cmd_type==MotorCommandType::NormalCommand;
     rx_count++;
-    if (rx_count%100==0) {
-        logger.log("Rx count: %d, fail count: %d\n", rx_count, fail_count);
+    if (!crc_correct) {
+        crc_wrong_count++;
     }
-    if (!result)
-        fail_count++;
-    if (result) {
-        auto cmd3 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+4));
-        auto cmd2 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+16));
-        auto cmd1 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+28));
+    if (rx_count%100==0) {
+        logger.log("Rx count: %d, crc wrong count: %d\n", rx_count, crc_wrong_count);
+    }
+    if (crc_correct && correct_command) {
+        const bool motor1_within_limits = motor_pos_trackers[0].is_within_limits(joint_lower_limits[0], joint_upper_limits[0]);
+        const bool motor2_within_limits = motor_pos_trackers[1].is_within_limits(joint_lower_limits[1], joint_upper_limits[1]);
+        const bool motor3_within_limits = motor_pos_trackers[2].is_within_limits(joint_lower_limits[2], joint_upper_limits[2]);
+
+        auto cmd3 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+4), motor1_within_limits);
+        auto cmd2 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+16), motor2_within_limits);
+        auto cmd1 = Get_CAN_Command(reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+28), motor3_within_limits);
         CAN1->sTxMailBox[0].TDLR = *reinterpret_cast<uint32_t*>(&cmd1[0]);
         CAN1->sTxMailBox[0].TDHR = *reinterpret_cast<uint32_t*>(&cmd1[4]);
         CAN1->sTxMailBox[1].TDLR = *reinterpret_cast<uint32_t*>(&cmd2[0]);
         CAN1->sTxMailBox[1].TDHR = *reinterpret_cast<uint32_t*>(&cmd2[4]);
         CAN1->sTxMailBox[2].TDLR = *reinterpret_cast<uint32_t*>(&cmd3[0]);
         CAN1->sTxMailBox[2].TDHR = *reinterpret_cast<uint32_t*>(&cmd3[4]);
-        if ((CAN1->TSR & 0b111 << 26)==0b111 << 26) {
+        if ((CAN1->TSR & 0b111 << 26)==0b111 << 26) { // check that all 3 mailboxes are empty
             // We transmit 0x141 and 0x142, and then only transmit 0x143 after 0x142 is received to prevent motor not transmitting
             // see CAN_Rx interrupt for 0x143 transmit
             CAN1->sTxMailBox[0].TIR |= CAN_TI0R_TXRQ;
             CAN1->sTxMailBox[1].TIR |= CAN_TI0R_TXRQ;
             LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
         }
-        else{
-            logger.log("CAN TSR busy\n");
+        else {
+            logger.log("CAN TSR busy, msg id: %lu\n", cmd_message.MessageId);
         }
         if (rx_count%100==0) {
-            if(cmd1[0] == 0xa4 || cmd1[0] == 0xa2){
+            if (cmd1[0]==0xa4 || cmd1[0]==0xa2) {
                 logger.log("Cmd1: %x, val: %ld\n", cmd1[0], *reinterpret_cast<int32_t*>(&cmd1[4]));
                 logger.log("Cmd2: %x, val: %ld\n", cmd2[0], *reinterpret_cast<int32_t*>(&cmd2[4]));
                 logger.log("Cmd3: %x, val: %ld\n", cmd3[0], *reinterpret_cast<int32_t*>(&cmd3[4]));
             }
-            else if(cmd1[0] == 0xa1){
-                std::array<double, 3> params{-0.1,-0.1,-0.1};
-                std::memcpy(&params[0], reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+4)->Param.data(), 8);
-                std::memcpy(&params[1], reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+16)->Param.data(), 8);
-                std::memcpy(&params[2], reinterpret_cast<MotorCommandSingle*>(spi1_input_buffer1.data()+28)->Param.data(), 8);
+            else if (cmd1[0]==0xa1) {
+                std::array<double, 3> params{-0.1, -0.1, -0.1};
+                params[0] = cmd_message.MotorCommands[0].Param;
+                params[1] = cmd_message.MotorCommands[1].Param;
+                params[2] = cmd_message.MotorCommands[2].Param;
                 logger.log("Cmd1: %x, val: %d, raw: %f\n", cmd1[0], *reinterpret_cast<int16_t*>(&cmd1[4]), params[0]);
-
                 logger.log("Cmd2: %x, val: %d, raw: %f\n", cmd2[0], *reinterpret_cast<int16_t*>(&cmd2[4]), params[1]);
                 logger.log("Cmd3: %x, val: %d, raw: %f\n", cmd3[0], *reinterpret_cast<int16_t*>(&cmd3[4]), params[2]);
             }
         }
     }
-    // Re-enable the DMA (data pointer and length will be reset to whatever that is there previously)
-    DMA2_Stream2->CR |= DMA_SxCR_EN;
 
     // in case the tx dma didn't complete (insufficient clocks received for example), reset the transmit buffer
     // This is such that the first byte on the next transmit can remain correct
@@ -416,7 +449,8 @@ void DMA2_Stream2_IRQHandler()
     uint32_t dma_bytes_left = DMA2_Stream3->NDTR;
     if (dma_bytes_left!=data_length_spi-1 && dma_bytes_left!=0) {
 //        Reset_SPI1_DMA_Tx();
-        logger.log("SPI transmit error with %d bytes left, resetting\n", dma_bytes_left);
+        // TODO: Add one-pulse timer to trigger interrupt to do a reset
+        logger.log("SPI transmit error with %d bytes left\n", dma_bytes_left);
     }
 }
 
@@ -426,7 +460,7 @@ void DMA2_Stream3_IRQHandler()
     // Clear all the flags
     SET_BIT(DMA2->LIFCR, DMA_LIFCR_CTCIF3 | DMA_LIFCR_CHTIF3 | DMA_LIFCR_CTEIF3 | DMA_LIFCR_CFEIF3 | DMA_LIFCR_CDMEIF3);
     // Reset the status bits of the transmit message
-    motor_feedback_full.status = 0;
+    motor_feedback_full.status = MotorFeedbackStatus{};
 
     // Re-enable the DMA (data pointer and length will be reset to whatever that is there previously)
     DMA2_Stream3->CR |= DMA_SxCR_EN;
@@ -434,65 +468,63 @@ void DMA2_Stream3_IRQHandler()
 
 std::array<uint32_t, 3> motor_rx_counts = {};
 uint32_t total_rx_counts = 0;
-
 // CAN Rx FIFO0 IRQ Handler
 void CAN1_RX0_IRQHandler()
 {
     uint32_t stdId = (CAN1->sFIFOMailBox[0].RIR & CAN_RI0R_STID_Msk) >> CAN_RI0R_STID_Pos;
-    uint32_t data_low = CAN1->sFIFOMailBox[0].RDLR;
-    uint32_t data_high = CAN1->sFIFOMailBox[0].RDHR;
     std::array<uint8_t, 8> data{};
     *reinterpret_cast<uint32_t*>(&data[0]) = CAN1->sFIFOMailBox[0].RDLR;
     *reinterpret_cast<uint32_t*>(&data[4]) = CAN1->sFIFOMailBox[0].RDHR;
-    auto feedback = reinterpret_cast<MotorFeedbackRaw*>(data.data());
+    MotorFeedbackRaw feedback;
+    std::memcpy(&feedback, data.data(), 8);
 
     SET_BIT(CAN1->RF0R, CAN_RF0R_RFOM0);
-    if (data[0]!=0x9c && ((data[0] < 0xa1) || (data[0] > 0xa4)))
+    if (data[0]!=0x9c && ((data[0]<0xa1) || (data[0]>0xa4)))
         return;
     total_rx_counts++;
     if (stdId==0x143) {
-        motor_pos_trackers[0].update(feedback->EncoderPos);
+        motor_pos_trackers[0].update(feedback.EncoderPos);
         motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
-        motor_feedback_full.Feedbacks[0].torque = (float)feedback->TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[0].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[0].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 0;
-        motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
+        motor_feedback_full.Feedbacks[0].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[0].velocity = feedback.Speed;
+        motor_feedback_full.Feedbacks[0].temperature = feedback.Temperature;
+        motor_feedback_full.status.Motor1Ready = true;
+        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[0]++;
     }
     else if (stdId==0x142) {
-        motor_pos_trackers[1].update(feedback->EncoderPos);
+        motor_pos_trackers[1].update(feedback.EncoderPos);
         motor_feedback_full.Feedbacks[1].angle = motor_pos_trackers[1].get_angle_f();
-        motor_feedback_full.Feedbacks[1].torque = (float)feedback->TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[1].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[1].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 1;
-        motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
+        motor_feedback_full.Feedbacks[1].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[1].velocity = feedback.Speed;
+        motor_feedback_full.Feedbacks[1].temperature = feedback.Temperature;
+        motor_feedback_full.status.Motor2Ready = true;
+        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[1]++;
         // we only transmit 0x143 after 0x142 is received to prevent missing message
         CAN1->sTxMailBox[2].TIR |= CAN_TI0R_TXRQ;
     }
     else if (stdId==0x141) {
-        motor_pos_trackers[2].update(feedback->EncoderPos);
+        motor_pos_trackers[2].update(feedback.EncoderPos);
         motor_feedback_full.Feedbacks[2].angle = motor_pos_trackers[2].get_angle_f();
-        motor_feedback_full.Feedbacks[2].torque = (float)feedback->TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[2].velocity = feedback->Speed;
-        motor_feedback_full.Feedbacks[2].temperature = feedback->Temperature;
-        motor_feedback_full.status |= 0b1 << 2;
-        motor_feedback_full.CRC32 = CalculateCRC((uint32_t*)&motor_feedback_full, 19);
+        motor_feedback_full.Feedbacks[2].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[2].velocity = feedback.Speed;
+        motor_feedback_full.Feedbacks[2].temperature = feedback.Temperature;
+        motor_feedback_full.status.Motor3Ready = true;
+        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[2]++;
     }
     if (total_rx_counts%500==0) {
         logger.log("Total rx count: %d, 1: %d, 2: %d, 3: %d\n", total_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
                 motor_rx_counts[2]);
     }
-    if (total_rx_counts%500==1) {
+    if (total_rx_counts%500==0) {
         logger.log("P1: %f, P2: %f, P3: %f\n", motor_pos_trackers[0].get_angle_f(), motor_pos_trackers[1].get_angle_f(),
                 motor_pos_trackers[2].get_angle_f());
     }
 }
 
-// USART2 TX DMA Stream
+// USART2 TX DMA Stream (Logger use)
 void DMA1_Stream6_IRQHandler()
 {
     // Clear all the flags
@@ -506,7 +538,6 @@ void DMA1_Stream6_IRQHandler()
         DMA1_Stream6->CR |= DMA_SxCR_EN;
         USART2->CR3 |= USART_CR3_DMAT;
     }
-
 }
 
 void TIM7_IRQHandler()
@@ -516,7 +547,7 @@ void TIM7_IRQHandler()
 //        LL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
     }
 }
-/* IRQ Handlers End */
+/* ============================ IRQ Handlers End ===================================*/
 
 int main(void)
 {
@@ -592,7 +623,7 @@ int main(void)
             USART2->CR3 |= USART_CR3_DMAT;
         }
         LL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
-        LL_mDelay(200);
+        LL_mDelay(2);
         /* USER CODE END WHILE */
 
         /* USER CODE BEGIN 3 */
