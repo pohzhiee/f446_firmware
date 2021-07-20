@@ -78,7 +78,7 @@ static_assert(sizeof(MotorFeedbackFull)==80);
 
 struct MotorFeedbackRaw {
     uint8_t Command: 8;
-    int8_t Temperature: 8;
+    uint8_t Temperature: 8;
     int16_t TorqueCurrentRaw: 16;
     int16_t Speed: 16;
     uint16_t EncoderPos: 16;
