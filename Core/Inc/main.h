@@ -67,8 +67,10 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 void CAN1_RX0_IRQHandler();
+void TIM6_DAC_IRQHandler();
 void TIM7_IRQHandler();
-void DMA1_Stream6_IRQHandler();
+void TIM8_BRK_TIM12_IRQHandler();
+void DMA2_Stream7_IRQHandler();
 void DMA2_Stream2_IRQHandler();
 void DMA2_Stream3_IRQHandler();
 /* USER CODE END EFP */

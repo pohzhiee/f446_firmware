@@ -70,14 +70,15 @@ private:
 
 std::array<MotorPosTracker, 6> motor_pos_trackers;
 
-void Log_CAN_Command(std::array<uint8_t, 8> &can_command, uint8_t index, double raw_data){
+void Log_CAN_Command(std::array<uint8_t, 8>& can_command, uint8_t index, double raw_data)
+{
     if (can_command[0]==0xa4 || can_command[0]==0xa2) {
         logger.log("Cmd%d: %x, val: %ld\n", index, can_command[0], *reinterpret_cast<int32_t*>(&can_command[4]));
     }
     else if (can_command[0]==0xa1) {
         logger.log("Cmd%d: %x, val: %d, raw: %f\n", index, can_command[0], *reinterpret_cast<int16_t*>(&can_command[4]), raw_data);
     }
-    else{
+    else {
         logger.log("Unsupported CAN command logged: %x, index: %d", can_command[0], index);
     }
 }
@@ -199,6 +200,18 @@ void CAN1_Init()
     while ((CAN1->MSR & CAN_MSR_INAK)!=0U) { }
 }
 
+void TIM6_Init()
+{
+    SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM6EN);
+    NVIC_EnableIRQ(TIM6_DAC_IRQn);
+    NVIC_SetPriority(TIM6_DAC_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 8, 0));
+    TIM6->CR1 = TIM_CR1_OPM; // Set one pulse mode
+    TIM6->DIER = 1; // Enable update interrupt
+    // Set delay of 444us, TIM6 clk of 90Mhz, prescaler 100, counter 400, takes time of 1/ (90*10e6 / 100 / 400) to overflow = 444.44us
+    TIM6->PSC = 100-1;
+    TIM6->ARR = 400-1;
+}
+
 void TIM7_Init()
 {
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM7EN);
@@ -211,45 +224,57 @@ void TIM7_Init()
     TIM7->CR1 = 1;
 }
 
-void USART2_Init()
+void TIM12_Init()
 {
-    // Enable clock to USART2 and GPIOA
-    SET_BIT(RCC->APB1ENR, RCC_APB1ENR_USART2EN);
-    SET_BIT(RCC->AHB1ENR, RCC_AHB1ENR_GPIOAEN);
 
-    // Configure GPIO for PA2 and PA3 (USART2 Tx Rx respectively)
+    SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM12EN);
+    NVIC_EnableIRQ(TIM8_BRK_TIM12_IRQn);
+    NVIC_SetPriority(TIM8_BRK_TIM12_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 7, 0));
+    TIM12->CR1 = TIM_CR1_OPM; // Set one pulse mode
+    TIM12->DIER = 1; // Enable update interrupt
+    TIM12->PSC = 500-1;
+    TIM12->ARR = 4500-1;
+}
+
+void USART1_Init()
+{
+    // Enable clock to USART1 and GPIOB
+    SET_BIT(RCC->APB2ENR, RCC_APB2ENR_USART1EN);
+    SET_BIT(RCC->AHB1ENR, RCC_AHB1ENR_GPIOBEN);
+
+    // Configure GPIO for PB6 and PB7 (USART1 Tx Rx respectively)
     LL_GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin = LL_GPIO_PIN_2 | LL_GPIO_PIN_3;
+    GPIO_InitStruct.Pin = LL_GPIO_PIN_6 | LL_GPIO_PIN_7;
     GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
     GPIO_InitStruct.Pull = LL_GPIO_PULL_NO;
     GPIO_InitStruct.Speed = LL_GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = LL_GPIO_AF_7;
-    LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    LL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
     // Enable transmitter
-    // 2,000,000 baud with oversampling by 8 instead of 16
-    USART2->BRR = 2 << 4 | 13; // 2M baud baud (BRR = 45/(8*2) = 2.8125 (floating point part = 0.8125 * 16 = 13)
-    USART2->CR1 = USART_CR1_TE | USART_CR1_OVER8;
-    USART2->CR2 = 0;
-    USART2->CR3 = 0;
-    // Enable USART2
-    SET_BIT(USART2->CR1, USART_CR1_UE);
+    // 2M baud (BRR = 90/(16*2) = 2.8125 (floating point part = 0.8125 * 16 = 13), oversampling 16
+    USART1->BRR = 2 << 4 | 12;
+    USART1->CR1 = USART_CR1_TE; // 1,000,000 baud with oversampling by 16
+    USART1->CR2 = 0;
+    USART1->CR3 = 0;
+    // Enable USART1
+    SET_BIT(USART1->CR1, USART_CR1_UE);
 }
 
-void USART2_TxDMA_Init()
+void USART1_TxDMA_Init()
 {
-    // Enable DMA1
-    RCC->AHB1ENR |= (RCC_AHB1ENR_DMA1EN);
-    // Setup DMA1 for USART2 TX (DMA1 Stream 6 Channel 4)
+    // Enable DMA2
+    RCC->AHB1ENR |= (RCC_AHB1ENR_DMA2EN);
+    // Setup DMA2 for USART1 TX (DMA2 Stream 7 Channel 4)
     // Enable NVIC Interrupt
-    NVIC_EnableIRQ(DMA1_Stream6_IRQn);
-    NVIC_SetPriority(DMA1_Stream6_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 15, 0));
+    NVIC_EnableIRQ(DMA2_Stream7_IRQn);
+    NVIC_SetPriority(DMA2_Stream7_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 15, 0));
 
     // Set priority to medium, direction mem->periph, transfer complete interrupt, memory increment true, channel 4
     // Default to non double buffer mode
-    DMA1_Stream6->CR = 0b01 << 16 | 0b01 << 6 | 0b1 << 4 | 0b1 << 10 | 0b100 << 25;
-    // Set periph address register to USART2 data register
-    DMA1_Stream6->PAR = reinterpret_cast<std::uintptr_t>(&USART2->DR);
+    DMA2_Stream7->CR = 0b01 << 16 | 0b01 << 6 | 0b1 << 4 | 0b1 << 10 | 0b100 << 25;
+    // Set periph address register to USART1 data register
+    DMA2_Stream7->PAR = reinterpret_cast<std::uintptr_t>(&USART1->DR);
 }
 
 void SPI1_Init()
@@ -337,6 +362,8 @@ std::array<std::array<uint8_t, 8>, 3> CAN_rx_buffer{};
 uint32_t can_rx_cmplt_count = 0;
 
 /* ============================ IRQ Handlers Begin ===================================*/
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
 uint32_t rx_count = 0;
 uint32_t crc_wrong_count = 0;
 // SPI1 RX DMA Stream, triggered on end of single transmission
@@ -355,58 +382,62 @@ void DMA2_Stream2_IRQHandler()
     auto cmd_type = cmd_message.CommandType;
     bool correct_command = cmd_type==MotorCommandType::NormalCommand;
     rx_count++;
+
     if (!crc_correct) {
         crc_wrong_count++;
+        return;
     }
-    if (rx_count%100==0) {
-        logger.log("Rx count: %d, crc wrong count: %d\n", rx_count, crc_wrong_count);
-    }
-    if(!correct_command){
+
+    if (!correct_command) {
         uint16_t a;
         memcpy(&a, &cmd_message.CommandType, 2);
         logger.log("Wrong command received: %X, id: %u", a, cmd_message.MessageId);
+        return;
     }
-    if (crc_correct && correct_command) {
-        const bool motor1_within_limits = motor_pos_trackers[0].is_within_limits(joint_lower_limits[0], joint_upper_limits[0]);
-        const bool motor2_within_limits = motor_pos_trackers[1].is_within_limits(joint_lower_limits[1], joint_upper_limits[1]);
-        const bool motor3_within_limits = motor_pos_trackers[2].is_within_limits(joint_lower_limits[2], joint_upper_limits[2]);
-        if (!motor1_within_limits) {
-            logger.log("Motor 1 not within limits with angle of %f on command %u\n", motor_pos_trackers[0].get_angle_f(),
+
+    bool log_condition = rx_count%100==0 || (rx_count>6400 && rx_count<7200 && rx_count%20==0);
+    if (log_condition) {
+        logger.log("Rx count: %d, crc wrong count: %d\n", rx_count, crc_wrong_count);
+    }
+
+    if ((CAN1->TSR & 0b111 << 26)!=0b111 << 26) {
+        logger.log("CAN TSR busy, msg id: %lu\n", cmd_message.MessageId);
+        return;
+    }
+
+    // Setup correct CRC32 for response first, in case no motor responds we still get correct CRC
+    motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
+
+    // Process messages 1 to 3
+    for (int i = 0; i<3; i++) {
+        // Check for whether will be ignored
+        auto ignore = cmd_message.MotorCommands.at(i).CommandMode==MotorCommandMode::Ignore;
+        if (ignore) {
+            logger.log("Ignoring motor %d\n", i);
+            continue;
+        }
+        // Check for motor limits
+        const bool motor_within_limits = motor_pos_trackers[i].is_within_limits(joint_lower_limits[i], joint_upper_limits[i]);
+        if (!motor_within_limits) {
+            logger.log("Motor %d not within limits with angle of %f on command %u\n", i, motor_pos_trackers[i].get_angle_f(),
                     cmd_message.MessageId);
         }
-        if (!motor2_within_limits) {
-            logger.log("Motor 2 not within limits with angle of %f on command %u\n", motor_pos_trackers[1].get_angle_f(),
-                    cmd_message.MessageId);
-        }
-        if (!motor3_within_limits) {
-            logger.log("Motor 3 not within limits with angle of %f on command %u\n", motor_pos_trackers[2].get_angle_f(),
-                    cmd_message.MessageId);
-        }
-        auto cmd1 = Get_CAN_Command(&cmd_message.MotorCommands.at(0), motor1_within_limits);
-        auto cmd2 = Get_CAN_Command(&cmd_message.MotorCommands.at(1), motor2_within_limits);
-        auto cmd3 = Get_CAN_Command(&cmd_message.MotorCommands.at(2), motor3_within_limits);
-        CAN1->sTxMailBox[0].TDLR = *reinterpret_cast<uint32_t*>(&cmd1[0]);
-        CAN1->sTxMailBox[0].TDHR = *reinterpret_cast<uint32_t*>(&cmd1[4]);
-        CAN1->sTxMailBox[1].TDLR = *reinterpret_cast<uint32_t*>(&cmd2[0]);
-        CAN1->sTxMailBox[1].TDHR = *reinterpret_cast<uint32_t*>(&cmd2[4]);
-        CAN1->sTxMailBox[2].TDLR = *reinterpret_cast<uint32_t*>(&cmd3[0]);
-        CAN1->sTxMailBox[2].TDHR = *reinterpret_cast<uint32_t*>(&cmd3[4]);
-        if ((CAN1->TSR & 0b111 << 26)==0b111 << 26) { // check that all 3 mailboxes are empty
-            // We transmit 0x141 and 0x142, and then only transmit 0x143 after 0x142 is received to prevent motor not transmitting
-            // see CAN_Rx interrupt for 0x143 transmit
-            CAN1->sTxMailBox[0].TIR |= CAN_TI0R_TXRQ;
-            CAN1->sTxMailBox[1].TIR |= CAN_TI0R_TXRQ;
-            LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+        auto cmd = Get_CAN_Command(&cmd_message.MotorCommands.at(i), motor_within_limits);
+        CAN1->sTxMailBox[i].TDLR = *reinterpret_cast<uint32_t*>(&cmd[0]);
+        CAN1->sTxMailBox[i].TDHR = *reinterpret_cast<uint32_t*>(&cmd[4]);
+        if (i!=2) {
+            CAN1->sTxMailBox[i].TIR |= CAN_TI0R_TXRQ;
         }
         else {
-            logger.log("CAN TSR busy, msg id: %lu\n", cmd_message.MessageId);
+            // Basically use a timer with delay of 444us before setting the TXRQ bit of the mailbox
+            // This is to guarantee that the motor will respond properly because it will not retransmit if arbitration fails
+            TIM6->CR1 |= TIM_CR1_CEN;
         }
-        if (rx_count%100==0) {
-            Log_CAN_Command(cmd1, 1, cmd_message.MotorCommands[0].Param);
-            Log_CAN_Command(cmd2, 2, cmd_message.MotorCommands[1].Param);
-            Log_CAN_Command(cmd3, 3, cmd_message.MotorCommands[2].Param);
+        if (log_condition) {
+            Log_CAN_Command(cmd, i, cmd_message.MotorCommands[i].Param);
         }
     }
+
 
     // in case the tx dma didn't complete (insufficient clocks received for example), reset the transmit buffer
     // This is such that the first byte on the next transmit can remain correct
@@ -466,8 +497,6 @@ void CAN1_RX0_IRQHandler()
         motor_feedback_full.status.Motor2Ready = true;
         motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[1]++;
-        // we only transmit 0x143 after 0x142 is received to prevent RMD-X8 not transmitting 0x143
-        CAN1->sTxMailBox[2].TIR |= CAN_TI0R_TXRQ;
     }
     else if (stdId==0x143) {
         motor_pos_trackers[2].update(feedback.EncoderPos);
@@ -489,29 +518,45 @@ void CAN1_RX0_IRQHandler()
     }
 }
 
-// USART2 TX DMA Stream (Logger use)
-void DMA1_Stream6_IRQHandler()
+// USART1 TX DMA Stream (Logger use)
+void DMA2_Stream7_IRQHandler()
 {
     // Clear all the flags
-    SET_BIT(DMA1->HIFCR, DMA_HIFCR_CTCIF6 | DMA_HIFCR_CHTIF6 | DMA_HIFCR_CTEIF6 | DMA_HIFCR_CFEIF6 | DMA_HIFCR_CDMEIF6);
-    CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
+    SET_BIT(DMA2->HIFCR, DMA_HIFCR_CTCIF7 | DMA_HIFCR_CHTIF7 | DMA_HIFCR_CTEIF7 | DMA_HIFCR_CFEIF7 | DMA_HIFCR_CDMEIF7);
+    CLEAR_BIT(USART1->CR3, USART_CR3_DMAT);
 
     if (logger.get_num_unprocessed()>0) {
         auto buf = logger.get_next_unprocessed_buf();
-        DMA1_Stream6->NDTR = buf.size();
-        DMA1_Stream6->M0AR = reinterpret_cast<uintptr_t>(buf.data());
-        DMA1_Stream6->CR |= DMA_SxCR_EN;
-        USART2->CR3 |= USART_CR3_DMAT;
+        DMA2_Stream7->NDTR = buf.size();
+        DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf.data());
+        DMA2_Stream7->CR |= DMA_SxCR_EN;
+        USART1->CR3 |= USART_CR3_DMAT;
     }
 }
 
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
+void TIM6_DAC_IRQHandler()
+{
+    if (READ_BIT(TIM6->SR, TIM_SR_UIF)) {
+        CLEAR_BIT(TIM6->SR, TIM_SR_UIF);
+        CAN1->sTxMailBox[2].TIR |= CAN_TI0R_TXRQ;
+        LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+    }
+}
+
 void TIM7_IRQHandler()
 {
     if (READ_BIT(TIM7->SR, TIM_SR_UIF)) {
         CLEAR_BIT(TIM7->SR, TIM_SR_UIF);
-        LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
+        LL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+        SET_BIT(TIM12->CR1, TIM_CR1_CEN);
+    }
+}
+
+void TIM8_BRK_TIM12_IRQHandler()
+{
+    if (READ_BIT(TIM12->SR, TIM_SR_UIF)) {
+        CLEAR_BIT(TIM12->SR, TIM_SR_UIF);
+        LL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
     }
 }
 #pragma clang diagnostic pop
@@ -555,15 +600,19 @@ int main()
 
     // Enable CRC
     RCC->AHB1ENR |= (RCC_AHB1ENR_CRCEN);
-    USART2_Init();
-    USART2_TxDMA_Init();
+    USART1_Init();
+    USART1_TxDMA_Init();
     CAN1_Init();
     SPI1_Init();
     SPI1_RxDMA_Init();
     SPI1_TxDMA_Init();
     SPI1_Start_DMA();
+    TIM6_Init();
+    TIM7_Init();
+    TIM12_Init();
     /* USER CODE END 2 */
 
+    // Setup correct mailbox parameters for the CAN
     uint8_t angle_read_cmd_bytes[8] = {0xa1, 0, 0, 0, 0, 0, 0, 0};
     for (int i = 0; i<3; i++) {
         CAN1->sTxMailBox[i].TDTR = 8;
@@ -572,24 +621,22 @@ int main()
         CAN1->sTxMailBox[i].TDHR = *reinterpret_cast<uint32_t*>(&angle_read_cmd_bytes[4]);
     }
 
-    TIM7_Init();
-
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
     while (true) {
 //        LL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
 
-//        logger.log("abcdefghijABCDEFGHIJ\n");
+        logger.log("123456789012345678901234567890123456789\n");
         // If DMA stream not enabled (finished processing) and still have logging data to process, then start the logging process
         // The DMA complete interrupt will trigger more logging until the logger's buffer is completed
-        // Check DMA1_Stream6_IRQHandler for the continuation of the logging process
-        if (logger.get_num_unprocessed()>0 && !(DMA1_Stream6->CR & DMA_SxCR_EN)) {
+        // Check DMA2_Stream7_IRQHandler for the continuation of the logging process
+        if (logger.get_num_unprocessed()>0 && !(DMA2_Stream7->CR & DMA_SxCR_EN)) {
             auto buf = logger.get_next_unprocessed_buf();
-            DMA1_Stream6->NDTR = buf.size();
-            DMA1_Stream6->M0AR = reinterpret_cast<uintptr_t>(buf.data());
-            DMA1_Stream6->CR |= DMA_SxCR_EN;
-            USART2->CR3 |= USART_CR3_DMAT;
+            DMA2_Stream7->NDTR = buf.size();
+            DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf.data());
+            DMA2_Stream7->CR |= DMA_SxCR_EN;
+            USART1->CR3 |= USART_CR3_DMAT;
         }
 //        LL_GPIO_TogglePin(LED3_GPIO_Port, LED3_Pin);
         LL_mDelay(2);

@@ -4,10 +4,11 @@
 #include "Common.hpp"
 
 enum MotorCommandMode: uint16_t {
-    Read = 0,
-    Position = 1,
-    Velocity = 2,
-    Torque = 3
+    Ignore = 0,
+    Position = 0b1,
+    Velocity = 0b11,
+    Torque = 0b111,
+    Read = 0b1111
 };
 
 struct MotorCommandSingle {
