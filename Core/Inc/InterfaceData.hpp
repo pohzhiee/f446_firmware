@@ -12,7 +12,8 @@ enum MotorCommandMode: uint16_t {
 };
 
 struct MotorCommandSingle {
-    MotorCommandMode CommandMode;
+    MotorCommandMode CommandMode : 15;
+    bool IgnoreLimits : 1;
     double Param;
 }__attribute__((packed));
 static_assert(sizeof(MotorCommandSingle)==10);

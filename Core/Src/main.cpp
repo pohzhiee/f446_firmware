@@ -17,7 +17,7 @@ constexpr std::array<int32_t, 6> convert_joint_vals(const std::array<double, 6> 
 const std::array<int32_t, 6> joint_lower_limits = convert_joint_vals({-1.0, -1.0, -1.0, -1.0, -1.0});
 const std::array<int32_t, 6> joint_upper_limits = convert_joint_vals({1.0, 1.0, 1.0, 1.0, 1.0});
 
-Logger logger;
+Logger<16> logger;
 
 std::array<uint8_t, 256> spi1_input_buffer1{};
 std::array<uint8_t, 256> spi1_output_buffer1{};
@@ -99,12 +99,13 @@ inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd, bool with
         break;
     case Position:
         can_command[0] = 0xa4;
-        *reinterpret_cast<uint16_t*>(&can_command[2]) = 500; // set max speed to 500deg per sec (shaft, output = 83.33deg/s)
+        *reinterpret_cast<uint16_t*>(&can_command[2]) = 360; // set max speed to 360deg/s (shaft, output = 60deg/s)
         *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(cmd->Param*180.0*100.0*6.0/3.14159265358);
         break;
     case Velocity:
         can_command[0] = 0xa2;
-        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(cmd->Param);
+        // Input param is in rad/s in output so convert into 0.01deg/s in input (also consider gearing)
+        *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(cmd->Param*57.2958*100*6);
         break;
     case Torque:
         can_command[0] = 0xa1;
@@ -202,6 +203,8 @@ void CAN1_Init()
 
 void TIM6_Init()
 {
+    // This timer is used to create a delay before sending out 3rd CAN message to allow the motor to have time to respond properly
+    // 90MHz clock source for APB1
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM6EN);
     NVIC_EnableIRQ(TIM6_DAC_IRQn);
     NVIC_SetPriority(TIM6_DAC_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 8, 0));
@@ -214,6 +217,8 @@ void TIM6_Init()
 
 void TIM7_Init()
 {
+    // Main blink timer
+    // 90MHz clock source for APB1
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM7EN);
     NVIC_EnableIRQ(TIM7_IRQn);
     NVIC_SetPriority(TIM7_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 12, 0));
@@ -221,12 +226,12 @@ void TIM7_Init()
     TIM7->DIER = 1; // Enable update interrupt
     TIM7->PSC = 500-1;
     TIM7->ARR = 45000-1;
-    TIM7->CR1 = 1;
 }
 
 void TIM12_Init()
 {
-
+    // Secondary blink timer (for short pulsing)
+    // 90MHz clock source for APB1
     SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM12EN);
     NVIC_EnableIRQ(TIM8_BRK_TIM12_IRQn);
     NVIC_SetPriority(TIM8_BRK_TIM12_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 7, 0));
@@ -234,6 +239,20 @@ void TIM12_Init()
     TIM12->DIER = 1; // Enable update interrupt
     TIM12->PSC = 500-1;
     TIM12->ARR = 4500-1;
+}
+
+void TIM13_Init()
+{
+    // This is used as a watchdog timer for reading motor data periodically such that we can keep tracking the angle even when idling
+    // 90MHz clock source for APB1
+    SET_BIT(RCC->APB1ENR, RCC_APB1ENR_TIM13EN);
+    NVIC_EnableIRQ(TIM8_UP_TIM13_IRQn);
+    NVIC_SetPriority(TIM8_UP_TIM13_IRQn, NVIC_EncodePriority(NVIC_PRIORITYGROUP_4, 6, 0));
+    TIM13->CR1 = 0; // Disable and set all settings to default
+    TIM13->DIER = 1; // Enable update interrupt
+    // Set delay of 5ms, TIM6 clk of 90Mhz, prescaler 1000, counter 450, takes time of 1/ (90*10e6 / 1000 / 450) to overflow = 5ms
+    TIM13->PSC = 1000-1;
+    TIM13->ARR = 450-1;
 }
 
 void USART1_Init()
@@ -356,16 +375,17 @@ void SPI1_RxDMA_Init()
     DMA2_Stream2->NDTR = data_length_spi;
     DMA2_Stream2->CR |= DMA_SxCR_EN;
 }
-/* ============================ Initialisation Code End ===================================*/
 
-std::array<std::array<uint8_t, 8>, 3> CAN_rx_buffer{};
-uint32_t can_rx_cmplt_count = 0;
+uint32_t spi_rx_count = 0;
+uint32_t crc_wrong_count = 0;
+
+std::array<uint32_t, 3> motor_rx_counts = {};
+uint32_t can_rx_counts = 0;
+/* ============================ Initialisation Code End ===================================*/
 
 /* ============================ IRQ Handlers Begin ===================================*/
 #pragma clang diagnostic push
 #pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
-uint32_t rx_count = 0;
-uint32_t crc_wrong_count = 0;
 // SPI1 RX DMA Stream, triggered on end of single transmission
 void DMA2_Stream2_IRQHandler()
 {
@@ -381,7 +401,7 @@ void DMA2_Stream2_IRQHandler()
     bool crc_correct = cmd_message.CheckCRC();
     auto cmd_type = cmd_message.CommandType;
     bool correct_command = cmd_type==MotorCommandType::NormalCommand;
-    rx_count++;
+    spi_rx_count++;
 
     if (!crc_correct) {
         crc_wrong_count++;
@@ -395,9 +415,12 @@ void DMA2_Stream2_IRQHandler()
         return;
     }
 
-    bool log_condition = rx_count%100==0 || (rx_count>6400 && rx_count<7200 && rx_count%20==0);
+    // Reset the read data watchdog timer
+    TIM13->CNT = 0;
+
+    bool log_condition = spi_rx_count%100==0;
     if (log_condition) {
-        logger.log("Rx count: %d, crc wrong count: %d\n", rx_count, crc_wrong_count);
+        logger.log("Rx count: %d, crc wrong count: %d\n", spi_rx_count, crc_wrong_count);
     }
 
     if ((CAN1->TSR & 0b111 << 26)!=0b111 << 26) {
@@ -413,14 +436,18 @@ void DMA2_Stream2_IRQHandler()
         // Check for whether will be ignored
         auto ignore = cmd_message.MotorCommands.at(i).CommandMode==MotorCommandMode::Ignore;
         if (ignore) {
-            logger.log("Ignoring motor %d\n", i);
+//            logger.log("Ignoring motor %d\n", i);
             continue;
         }
-        // Check for motor limits
-        const bool motor_within_limits = motor_pos_trackers[i].is_within_limits(joint_lower_limits[i], joint_upper_limits[i]);
-        if (!motor_within_limits) {
-            logger.log("Motor %d not within limits with angle of %f on command %u\n", i, motor_pos_trackers[i].get_angle_f(),
-                    cmd_message.MessageId);
+        bool motor_within_limits = true;
+        auto ignore_limits = cmd_message.MotorCommands.at(i).IgnoreLimits;
+        if (!ignore_limits) {
+            // Check for motor limits
+            motor_within_limits = motor_pos_trackers[i].is_within_limits(joint_lower_limits[i], joint_upper_limits[i]);
+            if (!motor_within_limits) {
+                logger.log("Motor %d not within limits with angle of %f on command %u\n", i, motor_pos_trackers[i].get_angle_f(),
+                        cmd_message.MessageId);
+            }
         }
         auto cmd = Get_CAN_Command(&cmd_message.MotorCommands.at(i), motor_within_limits);
         CAN1->sTxMailBox[i].TDLR = *reinterpret_cast<uint32_t*>(&cmd[0]);
@@ -462,8 +489,6 @@ void DMA2_Stream3_IRQHandler()
     DMA2_Stream3->CR |= DMA_SxCR_EN;
 }
 
-std::array<uint32_t, 3> motor_rx_counts = {};
-uint32_t total_rx_counts = 0;
 // CAN Rx FIFO0 IRQ Handler
 void CAN1_RX0_IRQHandler()
 {
@@ -477,7 +502,7 @@ void CAN1_RX0_IRQHandler()
     SET_BIT(CAN1->RF0R, CAN_RF0R_RFOM0);
     if (data[0]!=0x9c && ((data[0]<0xa1) || (data[0]>0xa4)))
         return;
-    total_rx_counts++;
+    can_rx_counts++;
     if (stdId==0x141) {
         motor_pos_trackers[0].update(feedback.EncoderPos);
         motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
@@ -508,11 +533,11 @@ void CAN1_RX0_IRQHandler()
         motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
         motor_rx_counts[2]++;
     }
-    if (total_rx_counts%600==0) {
-        logger.log("Total rx count: %d, 1: %d, 2: %d, 3: %d\n", total_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
+    if (can_rx_counts%300==0) {
+        logger.log("Total CAN rx count: %d, 1: %d, 2: %d, 3: %d\n", can_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
                 motor_rx_counts[2]);
     }
-    if (total_rx_counts%600==0) {
+    if (can_rx_counts%300==0) {
         logger.log("P1: %f, P2: %f, P3: %f\n", motor_pos_trackers[0].get_angle_f(), motor_pos_trackers[1].get_angle_f(),
                 motor_pos_trackers[2].get_angle_f());
     }
@@ -534,6 +559,7 @@ void DMA2_Stream7_IRQHandler()
     }
 }
 
+// 3rd CAN message delay timer
 void TIM6_DAC_IRQHandler()
 {
     if (READ_BIT(TIM6->SR, TIM_SR_UIF)) {
@@ -543,6 +569,7 @@ void TIM6_DAC_IRQHandler()
     }
 }
 
+// Main blink timer
 void TIM7_IRQHandler()
 {
     if (READ_BIT(TIM7->SR, TIM_SR_UIF)) {
@@ -552,11 +579,39 @@ void TIM7_IRQHandler()
     }
 }
 
+// Secondary blink timer (for short pulsing)
 void TIM8_BRK_TIM12_IRQHandler()
 {
     if (READ_BIT(TIM12->SR, TIM_SR_UIF)) {
         CLEAR_BIT(TIM12->SR, TIM_SR_UIF);
         LL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
+    }
+}
+
+// Motor read data watchdog timer handler
+void TIM8_UP_TIM13_IRQHandler()
+{
+    if (READ_BIT(TIM13->SR, TIM_SR_UIF)) {
+        CLEAR_BIT(TIM13->SR, TIM_SR_UIF);
+        constexpr uint32_t read_data_cmd_HIGH = 0;
+        constexpr uint32_t read_data_cmd_LOW = 0x9c;
+
+        if ((CAN1->TSR & 0b111 << 26)!=0b111 << 26) {
+            logger.log("CAN TSR busy, watchdog\n");
+            return;
+        }
+
+        for(int i=0;i<3;i++){
+            CAN1->sTxMailBox[i].TDLR = read_data_cmd_LOW;
+            CAN1->sTxMailBox[i].TDHR = read_data_cmd_HIGH;
+            if (i!=2) {
+                CAN1->sTxMailBox[i].TIR |= CAN_TI0R_TXRQ;
+            }
+            else {
+                // Can treat this as setting 3rd CAN mailbox request bit, but with a delay
+                TIM6->CR1 |= TIM_CR1_CEN;
+            }
+        }
     }
 }
 #pragma clang diagnostic pop
@@ -610,6 +665,7 @@ int main()
     TIM6_Init();
     TIM7_Init();
     TIM12_Init();
+    TIM13_Init();
     /* USER CODE END 2 */
 
     // Setup correct mailbox parameters for the CAN
@@ -620,14 +676,15 @@ int main()
         CAN1->sTxMailBox[i].TDLR = *reinterpret_cast<uint32_t*>(angle_read_cmd_bytes);
         CAN1->sTxMailBox[i].TDHR = *reinterpret_cast<uint32_t*>(&angle_read_cmd_bytes[4]);
     }
-
+    SET_BIT(TIM7->CR1, TIM_CR1_CEN);
+    SET_BIT(TIM13->CR1, TIM_CR1_CEN);
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
     while (true) {
 //        LL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
 
-        logger.log("123456789012345678901234567890123456789\n");
+//        logger.log("123456789012345678901234567890123456789\n");
         // If DMA stream not enabled (finished processing) and still have logging data to process, then start the logging process
         // The DMA complete interrupt will trigger more logging until the logger's buffer is completed
         // Check DMA2_Stream7_IRQHandler for the continuation of the logging process
