@@ -8,7 +8,8 @@ enum MotorCommandMode: uint16_t {
     Position = 0b1,
     Velocity = 0b11,
     Torque = 0b111,
-    Read = 0b1111
+    Read = 0b1111,
+    SetZero = 0b10101
 };
 
 struct MotorCommandSingle {

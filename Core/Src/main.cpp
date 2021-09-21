@@ -4,6 +4,7 @@
 
 #include "Common.hpp"
 #include "InterfaceData.hpp"
+#include "MotorPosTracker.hpp"
 
 constexpr std::array<int32_t, 6> convert_joint_vals(const std::array<double, 6> joint_vals_rad)
 {
@@ -14,8 +15,8 @@ constexpr std::array<int32_t, 6> convert_joint_vals(const std::array<double, 6> 
     return values;
 }
 
-const std::array<int32_t, 6> joint_lower_limits = convert_joint_vals({-1.0, -1.0, -1.0, -1.0, -1.0});
-const std::array<int32_t, 6> joint_upper_limits = convert_joint_vals({1.0, 1.0, 1.0, 1.0, 1.0});
+const std::array<int32_t, 6> joint_lower_limits = convert_joint_vals({-1.5707, -1.57, -1.57, -1.0, -1.0});
+const std::array<int32_t, 6> joint_upper_limits = convert_joint_vals({1.5707, 1.57, 1.57, 1.0, 1.0});
 
 Logger<16> logger;
 
@@ -26,60 +27,21 @@ constexpr int data_length_spi = 80;
 
 void SystemClock_Config();
 
-class MotorPosTracker {
-public:
-    void init(int64_t start_angle)
-    {
-        if (start_angle<0)
-            loop_count = -1;
-        else
-            loop_count = 0;
-    }
-    void update(uint16_t encoder_pos)
-    {
-        int32_t encoder_diff = (int32_t)encoder_pos-(int32_t)current_encoder_val_;
-        if (encoder_diff<-40000) {
-            loop_count++;
-        }
-        else if (encoder_diff>40000) {
-            loop_count--;
-        }
-        current_encoder_val_ = encoder_pos;
-    }
-
-    [[nodiscard]] inline int32_t get_encoder_total() const
-    {
-        return current_encoder_val_+loop_count*65535;
-    }
-    [[nodiscard]] inline bool is_within_limits(int32_t lower_limit, int32_t upper_limit) const
-    {
-        const auto encoder_total = get_encoder_total();
-        return encoder_total<upper_limit && encoder_total>lower_limit;
-    }
-
-    [[nodiscard]] inline float get_angle_f() const
-    {
-        return get_encoder_total()*60.0f*3.1415926535898f/65535.0f/180.0f;
-    }
-
-private:
-    uint16_t current_encoder_val_ = 0;
-    int16_t loop_count = 0;
-
-};
-
 std::array<MotorPosTracker, 6> motor_pos_trackers;
 
 void Log_CAN_Command(std::array<uint8_t, 8>& can_command, uint8_t index, double raw_data)
 {
     if (can_command[0]==0xa4 || can_command[0]==0xa2) {
-        logger.log("Cmd%d: %x, val: %ld\n", index, can_command[0], *reinterpret_cast<int32_t*>(&can_command[4]));
+        logger.log("Cmd %d: %x, val: %ld\n", index, can_command[0], *reinterpret_cast<int32_t*>(&can_command[4]));
     }
     else if (can_command[0]==0xa1) {
-        logger.log("Cmd%d: %x, val: %d, raw: %f\n", index, can_command[0], *reinterpret_cast<int16_t*>(&can_command[4]), raw_data);
+        logger.log("Cmd %d: %x, val: %d, raw: %f\n", index, can_command[0], *reinterpret_cast<int16_t*>(&can_command[4]), raw_data);
+    }
+    else if (can_command[0]==0x9c) {
+        logger.log("Cmd %d: %x\n", index, can_command[0]);
     }
     else {
-        logger.log("Unsupported CAN command logged: %x, index: %d", can_command[0], index);
+        logger.log("Unsupported CAN command logged: %x, index: %d\n", can_command[0], index);
     }
 }
 
@@ -99,7 +61,7 @@ inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd, bool with
         break;
     case Position:
         can_command[0] = 0xa4;
-        *reinterpret_cast<uint16_t*>(&can_command[2]) = 360; // set max speed to 360deg/s (shaft, output = 60deg/s)
+        *reinterpret_cast<uint16_t*>(&can_command[2]) = 720; // set max speed to 360deg/s (shaft, output = 60deg/s)
         *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(cmd->Param*180.0*100.0*6.0/3.14159265358);
         break;
     case Velocity:
@@ -110,6 +72,12 @@ inline std::array<uint8_t, 8> Get_CAN_Command(MotorCommandSingle* cmd, bool with
     case Torque:
         can_command[0] = 0xa1;
         *reinterpret_cast<int16_t*>(&can_command[4]) = static_cast<int16_t>(cmd->Param*2048.0/33.0);
+        break;
+    case SetZero:
+        can_command[0] = 0x19;
+        for (int i = 0; i<7; i++) {
+            can_command[i+1] = 0;
+        }
         break;
     }
     return can_command;
@@ -445,7 +413,7 @@ void DMA2_Stream2_IRQHandler()
             // Check for motor limits
             motor_within_limits = motor_pos_trackers[i].is_within_limits(joint_lower_limits[i], joint_upper_limits[i]);
             if (!motor_within_limits) {
-                logger.log("Motor %d not within limits with angle of %f on command %u\n", i, motor_pos_trackers[i].get_angle_f(),
+                logger.log("Motor %d not within limits with angle of %f on command %u\n", i, motor_pos_trackers[i].get_motor_angle_rad(),
                         cmd_message.MessageId);
             }
         }
@@ -493,53 +461,53 @@ void DMA2_Stream3_IRQHandler()
 void CAN1_RX0_IRQHandler()
 {
     uint32_t stdId = (CAN1->sFIFOMailBox[0].RIR & CAN_RI0R_STID_Msk) >> CAN_RI0R_STID_Pos;
-    std::array<uint8_t, 8> data{};
-    *reinterpret_cast<uint32_t*>(&data[0]) = CAN1->sFIFOMailBox[0].RDLR;
-    *reinterpret_cast<uint32_t*>(&data[4]) = CAN1->sFIFOMailBox[0].RDHR;
-    MotorFeedbackRaw feedback; // NOLINT(cppcoreguidelines-pro-type-member-init)
-    std::memcpy(&feedback, data.data(), 8);
+    std::array<uint8_t, 8> transmitted_data{};
+    *reinterpret_cast<uint32_t*>(&transmitted_data[0]) = CAN1->sFIFOMailBox[0].RDLR;
+    *reinterpret_cast<uint32_t*>(&transmitted_data[4]) = CAN1->sFIFOMailBox[0].RDHR;
 
     SET_BIT(CAN1->RF0R, CAN_RF0R_RFOM0);
-    if (data[0]!=0x9c && ((data[0]<0xa1) || (data[0]>0xa4)))
+    if (transmitted_data[0]!=0x9c && ((transmitted_data[0]<0xa1) || (transmitted_data[0]>0xa4)) && transmitted_data[0]!=0x92)
         return;
     can_rx_counts++;
-    if (stdId==0x141) {
-        motor_pos_trackers[0].update(feedback.EncoderPos);
-        motor_feedback_full.Feedbacks[0].angle = motor_pos_trackers[0].get_angle_f();
-        motor_feedback_full.Feedbacks[0].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[0].velocity = feedback.Speed;
-        motor_feedback_full.Feedbacks[0].temperature = feedback.Temperature;
-        motor_feedback_full.status.Motor1Ready = true;
-        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
-        motor_rx_counts[0]++;
+    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
+        motor_rx_counts[stdId-0x141]++;
     }
-    else if (stdId==0x142) {
-        motor_pos_trackers[1].update(feedback.EncoderPos);
-        motor_feedback_full.Feedbacks[1].angle = motor_pos_trackers[1].get_angle_f();
-        motor_feedback_full.Feedbacks[1].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[1].velocity = feedback.Speed;
-        motor_feedback_full.Feedbacks[1].temperature = feedback.Temperature;
-        motor_feedback_full.status.Motor2Ready = true;
-        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
-        motor_rx_counts[1]++;
-    }
-    else if (stdId==0x143) {
-        motor_pos_trackers[2].update(feedback.EncoderPos);
-        motor_feedback_full.Feedbacks[2].angle = motor_pos_trackers[2].get_angle_f();
-        motor_feedback_full.Feedbacks[2].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[2].velocity = feedback.Speed;
-        motor_feedback_full.Feedbacks[2].temperature = feedback.Temperature;
-        motor_feedback_full.status.Motor3Ready = true;
-        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
-        motor_rx_counts[2]++;
-    }
+
     if (can_rx_counts%300==0) {
         logger.log("Total CAN rx count: %d, 1: %d, 2: %d, 3: %d\n", can_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
                 motor_rx_counts[2]);
     }
+
+
+    // We then parse for command feedback if it is none of the commands above (if it is any other command it should've returned by this point)
+    MotorFeedbackRaw feedback; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::memcpy(&feedback, transmitted_data.data(), 8);
+    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
+        auto index = stdId-0x141;
+        motor_pos_trackers[index].update(feedback.EncoderPos);
+        motor_feedback_full.Feedbacks[index].angle = motor_pos_trackers[index].get_motor_angle_rad();
+        motor_feedback_full.Feedbacks[index].torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[index].velocity = feedback.Speed;
+        motor_feedback_full.Feedbacks[index].temperature = feedback.Temperature;
+        switch (stdId) {
+        case 0x141:
+            motor_feedback_full.status.Motor1Ready = true;
+            break;
+        case 0x142:
+            motor_feedback_full.status.Motor2Ready = true;
+            break;
+        case 0x143:
+            motor_feedback_full.status.Motor3Ready = true;
+            break;
+        default:
+            break;
+        }
+        motor_feedback_full.CRC32 = GetCRC32((uint32_t*)&motor_feedback_full, 19);
+        motor_rx_counts[index]++;
+    }
     if (can_rx_counts%300==0) {
-        logger.log("P1: %f, P2: %f, P3: %f\n", motor_pos_trackers[0].get_angle_f(), motor_pos_trackers[1].get_angle_f(),
-                motor_pos_trackers[2].get_angle_f());
+        logger.log("P1: %f, P2: %f, P3: %f\n", motor_pos_trackers[0].get_motor_angle_rad(), motor_pos_trackers[1].get_motor_angle_rad(),
+                motor_pos_trackers[2].get_motor_angle_rad());
     }
 }
 
@@ -597,11 +565,11 @@ void TIM8_UP_TIM13_IRQHandler()
         constexpr uint32_t read_data_cmd_LOW = 0x9c;
 
         if ((CAN1->TSR & 0b111 << 26)!=0b111 << 26) {
-            logger.log("CAN TSR busy, watchdog\n");
+            logger.log("(Watchdog)CAN TSR busy, check connection\n");
             return;
         }
 
-        for(int i=0;i<3;i++){
+        for (int i = 0; i<3; i++) {
             CAN1->sTxMailBox[i].TDLR = read_data_cmd_LOW;
             CAN1->sTxMailBox[i].TDHR = read_data_cmd_HIGH;
             if (i!=2) {
