@@ -61,22 +61,29 @@ extern "C" {
 /* USER CODE BEGIN EM */
 
 /* USER CODE END EM */
-
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 void CAN1_RX0_IRQHandler();
+void CAN2_RX0_IRQHandler();
 void TIM6_DAC_IRQHandler();
 void TIM7_IRQHandler();
 void TIM8_BRK_TIM12_IRQHandler();
 void TIM8_UP_TIM13_IRQHandler();
+void TIM8_TRG_COM_TIM14_IRQHandler();
 void DMA2_Stream7_IRQHandler();
 void DMA2_Stream2_IRQHandler();
 void DMA2_Stream3_IRQHandler();
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define DBG1_Pin LL_GPIO_PIN_6
+#define DBG1_GPIO_Port GPIOC
+#define DBG2_Pin LL_GPIO_PIN_7
+#define DBG2_GPIO_Port GPIOC
+#define DBG3_Pin LL_GPIO_PIN_8
+#define DBG3_GPIO_Port GPIOC
 #define LED1_Pin LL_GPIO_PIN_10
 #define LED1_GPIO_Port GPIOC
 #define LED2_Pin LL_GPIO_PIN_11
