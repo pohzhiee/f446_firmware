@@ -51,7 +51,8 @@ enum class ConsiderLimits : uint64_t{
 struct MotorConfigSingle {
     MotorConfigType ConfigType;
     uint16_t Reserved;
-    std::array<uint8_t,12> Data;
+    std::array<uint8_t,8> Data;
+    std::array<uint8_t,4> Reserved2;
 };
 static_assert(sizeof(MotorCommandSingle)==16);
 

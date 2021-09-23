@@ -43,7 +43,7 @@ public:
     std::array<int, BufLen> buffer_sizes_{};
 };
 
-extern Logger<16> logger;
+extern Logger<32> logger;
 
 inline uint32_t GetCRC32(const uint32_t* start_ptr, uint32_t len)
 {

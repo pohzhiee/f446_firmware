@@ -8,7 +8,7 @@
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
-Logger<16> logger;
+Logger<32> logger;
 
 std::array<uint8_t, 256> spi1_input_buffer1{};
 std::array<uint8_t, 256> spi1_output_buffer1{};
@@ -85,7 +85,7 @@ public:
         return can_command;
     };
 
-    void SetConfig(const MotorConfigSingle& config)
+    void SetConfig(const MotorConfigSingle& config, int index, uint32_t message_id)
     {
         switch (config.ConfigType) {
         case MotorConfigType::GearRatio:
@@ -115,8 +115,12 @@ public:
                 std::memcpy(&a, config.Data.data(), 8);
                 if (a==ConsiderLimits::Ignore) {
                     ignore_limits_ = true;
+//                    logger.log("Motor %d ignore limits\n", index);
                 }
                 else { // We maybe need to check for validity of the enum data, but whatever, not much difference
+                    if(ignore_limits_){
+                        logger.log("Motor %d no longer ignore limits\n", index);
+                    }
                     ignore_limits_ = false;
                 }
             }();
@@ -129,6 +133,7 @@ public:
                 const double shaft_lower_limit = val*gear_ratio_;
                 const auto encoder_val = (int32_t)(shaft_lower_limit*shaft_rad_to_encoder_val);
                 lower_limit_encoder_val_ = encoder_val;
+//                logger.log("Motor %d lower limit: %f\n", index, val);
             }();
             break;
         case MotorConfigType::UpperJointLimit:
@@ -139,6 +144,7 @@ public:
                 const double shaft_upper_limit = val*gear_ratio_;
                 const auto encoder_val = (int32_t)(shaft_upper_limit*shaft_rad_to_encoder_val);
                 upper_limit_encoder_val_ = encoder_val;
+//                logger.log("Motor %d upper limit: %f\n", index, val);
             }();
             break;
         case MotorConfigType::PositionModeSpeed:
@@ -148,6 +154,7 @@ public:
                 speed_rad_ = val;
                 const double shaft_speed = val*gear_ratio_; // shaft speed in rad/s
                 speed_shaft_deg_ = (int16_t)(shaft_speed/M_PI*180);
+//                logger.log("Motor %d pos mode speed: %f\n", index, val);
             }();
             break;
         case MotorConfigType::SetTorqueMultiplier:
@@ -155,9 +162,11 @@ public:
                 double val;
                 std::memcpy(&val, config.Data.data(), 8);
                 torque_multiplier_ = val;
+//                logger.log("Motor %d torque multiplier: %f, after multiplying gear ratio: %f\n", index, val, val*gear_ratio_);
             }();
             break;
         default:
+//            logger.log("Ignoring Motor %d on msg %u\n", index, message_id);
             break;
         }
     }
@@ -523,6 +532,7 @@ uint32_t can2_rx_counts = 0;
 // SPI1 RX DMA Stream, triggered on end of single transmission
 void DMA2_Stream2_IRQHandler()
 {
+    LL_GPIO_TogglePin(DBG1_GPIO_Port, DBG1_Pin);
     // Clear all the flags
     SET_BIT(DMA2->LIFCR, DMA_LIFCR_CTCIF2 | DMA_LIFCR_CHTIF2 | DMA_LIFCR_CTEIF2 | DMA_LIFCR_CFEIF2 | DMA_LIFCR_CDMEIF2);
 
@@ -628,9 +638,9 @@ void DMA2_Stream2_IRQHandler()
                 logger.log("Fatal error, determined is config command but actually not. Please check\n");
                 return;
             }
-            logger.log("Motor config message with id %d received, configuring...\n", config_message.MessageId);
+//            logger.log("Motor config message with id %d received, configuring...\n", config_message.MessageId);
             for (int i = 0; i<6; i++) {
-                motors[i].SetConfig(config_message.MotorConfigs[i]);
+                motors[i].SetConfig(config_message.MotorConfigs[i], i, config_message.MessageId);
             }
         }();
         break;
@@ -641,6 +651,7 @@ void DMA2_Stream2_IRQHandler()
         std::memcpy(&message_id, spi1_input_buffer1.data()+4, 4);
         logger.log("Wrong command received: %X, id: %u\n", cmd_type_raw, message_id);
     }
+    LL_GPIO_TogglePin(DBG1_GPIO_Port, DBG1_Pin);
 
 
 // We leave checking for tx DMA complete for last to give it some time to complete the DMA tx
