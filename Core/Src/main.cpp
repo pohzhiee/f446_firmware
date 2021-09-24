@@ -28,7 +28,8 @@ public:
     int32_t upper_limit_encoder_val_{static_cast<int32_t>(M_PI_2*6.0*shaft_rad_to_encoder_val)};
     double speed_rad_{720.0/6.0*M_PI/180.0}; // position mode output speed in radians/sec
     uint16_t speed_shaft_deg_{720}; // position mode shaft speed in degrees/sec
-    double torque_multiplier_{0.1667}; // default to 1/6 because default gear ratio is 6
+    const double base_torque_constant_{6.0};
+    double torque_multiplier_{1.0}; // default value of 1.0 to represent uncalibrated
 
     [[nodiscard]] std::array<uint8_t, 8> GetCommand(const MotorCommandSingle& cmd) const
     {
@@ -71,7 +72,7 @@ public:
             // By default the gear ratio and torque multiplier cancel each other out so 1Nm of input torque will set send command equivalent
             // to 1.0 to the motor
             std::memcpy(&param, cmd.Param.data(), 8);
-            *reinterpret_cast<int16_t*>(&can_command[4]) = static_cast<int16_t>(param*gear_ratio_*2048.0*torque_multiplier_/33.0);
+            *reinterpret_cast<int16_t*>(&can_command[4]) = static_cast<int16_t>(param*base_torque_constant_*torque_multiplier_*2048.0/gear_ratio_/33.0);
             break;
         case MotorCommandMode::SetZero:
             // Note that after this command is sent the motor will take some time resetting itself, during which it would not respond at all
