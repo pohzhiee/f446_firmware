@@ -1,223 +1,27 @@
 #include "main.h"
 #include <array>
 #include <cstring>
-#include <cmath>
 
 #include "Common.hpp"
+#include "Logger.hpp"
+#include "Motor.hpp"
 #include "InterfaceData.hpp"
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunknown-pragmas"
-Logger<32> logger;
+
+CharBuffer LogCharBuffer;
+Logger main_logger;
 
 std::array<uint8_t, 256> spi1_input_buffer1{};
 std::array<uint8_t, 256> spi1_output_buffer1{};
 MotorFeedbackFull motor_feedback_full;
 constexpr int data_length_spi = 108;
 
-static constexpr double shaft_rad_to_encoder_val = 65535.0/2.0/M_PI;
-static constexpr double rad_to_deg = 180/M_PI;
-static constexpr double deg_to_rad = M_PI/180.0;
-class Motor {
-public:
-    double gear_ratio_{6.0};
-    bool ignore_limits_{false};
-    double lower_limit_{-M_PI_2};
-    int32_t lower_limit_encoder_val_{static_cast<int32_t>(-M_PI_2*6.0*shaft_rad_to_encoder_val)};
-    double upper_limit_{M_PI_2};
-    int32_t upper_limit_encoder_val_{static_cast<int32_t>(M_PI_2*6.0*shaft_rad_to_encoder_val)};
-    double speed_rad_{720.0/6.0*M_PI/180.0}; // position mode output speed in radians/sec
-    uint16_t speed_shaft_deg_{720}; // position mode shaft speed in degrees/sec
-    const double base_torque_constant_{6.0};
-    double torque_multiplier_{1.0}; // default value of 1.0 to represent uncalibrated
-
-    [[nodiscard]] std::array<uint8_t, 8> GetCommand(const MotorCommandSingle& cmd) const
-    {
-        std::array<uint8_t, 8> can_command{};
-        if (!ignore_limits_) {
-            auto current_encoder_total = GetEncoderTotal();
-            if (current_encoder_total<lower_limit_encoder_val_ || current_encoder_total>upper_limit_encoder_val_) {
-                // If no ignore limits and exceeded joint limits, we send a 0 torque command to minimise damage
-                can_command[0] = 0xa1;
-                for (int i = 0; i<7; i++) {
-                    can_command[i+1] = 0;
-                }
-                return can_command;
-            }
-        }
-
-        double param;
-        switch (cmd.CommandMode) {
-        default:
-        case MotorCommandMode::Read:
-            can_command[0] = 0x9c;
-            break;
-        case MotorCommandMode::Position:
-            can_command[0] = 0xa4;
-            std::memcpy(&param, cmd.Param.data(), 8);
-            *reinterpret_cast<uint16_t*>(&can_command[2]) = speed_shaft_deg_; // set max speed to 720deg/s (shaft, output = 120deg/s)
-            // Position command takes position in units of 0.01deg/LSB, so we need to convert from rad to deg and then times 100
-            *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(param*gear_ratio_*rad_to_deg*100);
-            break;
-        case MotorCommandMode::Velocity:
-            can_command[0] = 0xa2;
-            std::memcpy(&param, cmd.Param.data(), 8);
-            // Input param is in rad/s output speed, motor expects value in 0.01deg/s (shaft speed, so need to consider gear ratio)
-            *reinterpret_cast<int32_t*>(&can_command[4]) = static_cast<int32_t>(param*rad_to_deg*gear_ratio_*100);
-            break;
-        case MotorCommandMode::Torque:
-            can_command[0] = 0xa1;
-            // Input param is in Nm output torque, so we need to consider gearing
-            // Output is mapped value from -2048-2048 representing torque values between -33-33
-            // By default the gear ratio and torque multiplier cancel each other out so 1Nm of input torque will set send command equivalent
-            // to 1.0 to the motor
-            std::memcpy(&param, cmd.Param.data(), 8);
-            *reinterpret_cast<int16_t*>(&can_command[4]) = static_cast<int16_t>(param*base_torque_constant_*torque_multiplier_*2048.0/gear_ratio_/33.0);
-            break;
-        case MotorCommandMode::SetZero:
-            // Note that after this command is sent the motor will take some time resetting itself, during which it would not respond at all
-            can_command[0] = 0x19;
-            for (int i = 0; i<7; i++) {
-                can_command[i+1] = 0;
-            }
-            break;
-        }
-
-        return can_command;
-    };
-
-    void SetConfig(const MotorConfigSingle& config, int index, uint32_t message_id)
-    {
-        switch (config.ConfigType) {
-        case MotorConfigType::GearRatio:
-            [&]() {
-                double val;
-                std::memcpy(&val, config.Data.data(), 8);
-                gear_ratio_ = val;
-                // We update all data that has to do with gear ratio when gear ratio changes to make it such that the order of setting the
-                // config becomes irrelevant. i.e. you can set gear ratio first then joint limits, or joint limits then gear ratio
-                // This is also why there is duplicated data for each field
-                // Also because we want to avoid gear ratio calculations during "hot" code which is during CAN command generation
-                double shaft_lower_limit = lower_limit_*gear_ratio_;
-                auto encoder_val = (int32_t)(shaft_lower_limit*shaft_rad_to_encoder_val);
-                lower_limit_encoder_val_ = encoder_val;
-
-                double shaft_upper_limit = upper_limit_*gear_ratio_;
-                encoder_val = (int32_t)(shaft_upper_limit*shaft_rad_to_encoder_val);
-                upper_limit_encoder_val_ = encoder_val;
-
-                const double shaft_speed = speed_rad_*gear_ratio_; // shaft speed in rad/s
-                speed_shaft_deg_ = (int16_t)(shaft_speed/M_PI*180);
-            }(); // we wrap it in a lambda because otherwise we cannot declare a variable inside a case statement
-            break;
-        case MotorConfigType::IgnoreLimits:
-            [&]() {
-                ConsiderLimits a;
-                std::memcpy(&a, config.Data.data(), 8);
-                if (a==ConsiderLimits::Ignore) {
-                    ignore_limits_ = true;
-//                    logger.log("Motor %d ignore limits\n", index);
-                }
-                else { // We maybe need to check for validity of the enum data, but whatever, not much difference
-                    if(ignore_limits_){
-                        logger.log("Motor %d no longer ignore limits\n", index);
-                    }
-                    ignore_limits_ = false;
-                }
-            }();
-            break;
-        case MotorConfigType::LowerJointLimit:
-            [&]() {
-                double val;
-                std::memcpy(&val, config.Data.data(), 8);
-                lower_limit_ = val;
-                const double shaft_lower_limit = val*gear_ratio_;
-                const auto encoder_val = (int32_t)(shaft_lower_limit*shaft_rad_to_encoder_val);
-                lower_limit_encoder_val_ = encoder_val;
-//                logger.log("Motor %d lower limit: %f\n", index, val);
-            }();
-            break;
-        case MotorConfigType::UpperJointLimit:
-            [&]() {
-                double val;
-                std::memcpy(&val, config.Data.data(), 8);
-                upper_limit_ = val;
-                const double shaft_upper_limit = val*gear_ratio_;
-                const auto encoder_val = (int32_t)(shaft_upper_limit*shaft_rad_to_encoder_val);
-                upper_limit_encoder_val_ = encoder_val;
-//                logger.log("Motor %d upper limit: %f\n", index, val);
-            }();
-            break;
-        case MotorConfigType::PositionModeSpeed:
-            [&]() {
-                double val;
-                std::memcpy(&val, config.Data.data(), 8);
-                speed_rad_ = val;
-                const double shaft_speed = val*gear_ratio_; // shaft speed in rad/s
-                speed_shaft_deg_ = (int16_t)(shaft_speed/M_PI*180);
-//                logger.log("Motor %d pos mode speed: %f\n", index, val);
-            }();
-            break;
-        case MotorConfigType::SetTorqueMultiplier:
-            [&]() {
-                double val;
-                std::memcpy(&val, config.Data.data(), 8);
-                torque_multiplier_ = val;
-//                logger.log("Motor %d torque multiplier: %f, after multiplying gear ratio: %f\n", index, val, val*gear_ratio_);
-            }();
-            break;
-        default:
-//            logger.log("Ignoring Motor %d on msg %u\n", index, message_id);
-            break;
-        }
-    }
-
-    [[nodiscard]] inline int32_t GetEncoderTotal() const
-    {
-        return current_encoder_val_+encoder_loop_count_*65535;
-    }
-
-    void UpdateEncoderVal(uint16_t encoder_pos)
-    {
-        int32_t encoder_diff = (int32_t)encoder_pos-(int32_t)current_encoder_val_;
-        if (encoder_diff<-40000) {
-            encoder_loop_count_++;
-        }
-        else if (encoder_diff>40000) {
-            encoder_loop_count_--;
-        }
-        current_encoder_val_ = encoder_pos;
-    }
-
-    [[nodiscard]] float GetOutputAngleRad() const
-    {
-        constexpr double encoder_to_deg_constant = 1/65535.0*360.0;
-        constexpr double deg_to_rad_constant = 3.141592653589793238/180;
-        constexpr double encoder_to_rad_constant = encoder_to_deg_constant*deg_to_rad_constant;
-        return static_cast<float>(GetEncoderTotal()*encoder_to_rad_constant/gear_ratio_);
-    }
-
-private:
-    uint16_t current_encoder_val_ = 0;
-    int32_t encoder_loop_count_ = 0;
-};
 
 void SystemClock_Config();
 
 void Log_CAN_Command(std::array<uint8_t, 8>& can_command, uint8_t index, double raw_data)
 {
-    if (can_command[0]==0xa4 || can_command[0]==0xa2) {
-        logger.log("Cmd %d: %x, val: %ld\n", index, can_command[0], *reinterpret_cast<int32_t*>(&can_command[4]));
-    }
-    else if (can_command[0]==0xa1) {
-        logger.log("Cmd %d: %x, val: %d, raw: %f\n", index, can_command[0], *reinterpret_cast<int16_t*>(&can_command[4]), raw_data);
-    }
-    else if (can_command[0]==0x9c) {
-        logger.log("Cmd %d: %x\n", index, can_command[0]);
-    }
-    else {
-        logger.log("Unsupported CAN command logged: %x, index: %d\n", can_command[0], index);
-    }
+    main_logger.AddLog(CANLogger(can_command, index, raw_data));
 }
 
 /* ============================ Initialisation Code Begin ===================================*/
@@ -548,11 +352,11 @@ void DMA2_Stream2_IRQHandler()
         crc_wrong_count++;
         uint32_t message_id;
         std::memcpy(&message_id, spi1_input_buffer1.data()+4, 4);
-        logger.log("CRC wrong on message: %d\n", message_id);
+        main_logger.AddLog(SimpleNumLogger<1, uint32_t>("CRC wrong on message: %d\n", {message_id}));
         return;
     }
     if (spi_rx_count%500==0)
-        logger.log("Rx count: %d, crc wrong count: %d\n", spi_rx_count, crc_wrong_count);
+        main_logger.AddLog(SimpleNumLogger<2, uint32_t>("Rx count: %d, crc wrong count: %d\n", {spi_rx_count, crc_wrong_count}));
 
     MotorCommandType command_type;
     std::memcpy(&command_type, spi1_input_buffer1.data(), 2);
@@ -568,7 +372,7 @@ void DMA2_Stream2_IRQHandler()
             MotorCommandMsg cmd_message; // NOLINT(cppcoreguidelines-pro-type-member-init)
             std::memcpy(&cmd_message, spi1_input_buffer1.data(), sizeof(MotorCommandMsg));
             if (cmd_message.CommandType!=MotorCommandType::NormalCommand) {
-                logger.log("Fatal error, determined is normal motor command but actually not. Please check\n");
+                main_logger.AddLog(TextLogger("Fatal error, determined is normal motor command but actually not. Please check\n"));
                 return;
             }
 //            bool CAN1_TSR_Busy = false;
@@ -581,18 +385,18 @@ void DMA2_Stream2_IRQHandler()
 //                logger.log("CAN2 TSR busy, msg id: %lu\n", cmd_message.MessageId);
 //                CAN2_TSR_Busy = true;
 //            }
-            for (int i = 0; i<6; i++) {
+            for (unsigned i = 0; i<6; i++) {
                 if (cmd_message.MotorCommands.at(i).CommandMode==MotorCommandMode::Ignore)
                     continue;
                 if(i < 3){
                     if(!READ_BIT(CAN1->TSR, CAN_TSR_TME0 << i)){
-                        logger.log("CAN1 TME%d not empty, msg id: %lu\n",i, cmd_message.MessageId);
+                        main_logger.AddLog(SimpleNumLogger<2, uint32_t>("CAN1 TME%d not empty, msg id: %lu\n", {i, cmd_message.MessageId}));
                         continue;
                     }
                 }
                 else{
                     if(!READ_BIT(CAN2->TSR, CAN_TSR_TME0 << (i-3))){
-                        logger.log("CAN2 TME%d not empty, msg id: %lu\n",i-3, cmd_message.MessageId);
+                        main_logger.AddLog(SimpleNumLogger<2, uint32_t>("CAN2 TME%d not empty, msg id: %lu\n", {i, cmd_message.MessageId}));
                         continue;
                     }
                 }
@@ -636,7 +440,7 @@ void DMA2_Stream2_IRQHandler()
             MotorConfigMsg config_message; // NOLINT(cppcoreguidelines-pro-type-member-init)
             std::memcpy(&config_message, spi1_input_buffer1.data(), sizeof(MotorConfigMsg));
             if (config_message.CommandType!=MotorCommandType::ConfigCommand) {
-                logger.log("Fatal error, determined is config command but actually not. Please check\n");
+                main_logger.AddLog(TextLogger("Fatal error, determined is config command but actually not. Please check\n"));
                 return;
             }
 //            logger.log("Motor config message with id %d received, configuring...\n", config_message.MessageId);
@@ -650,7 +454,7 @@ void DMA2_Stream2_IRQHandler()
         uint32_t message_id;
         std::memcpy(&cmd_type_raw, spi1_input_buffer1.data(), 2);
         std::memcpy(&message_id, spi1_input_buffer1.data()+4, 4);
-        logger.log("Wrong command received: %X, id: %u\n", cmd_type_raw, message_id);
+        main_logger.AddLog(SimpleNumLogger<2, uint32_t>("Wrong command received: %X, id: %u\n", {cmd_type_raw, message_id}));
     }
     LL_GPIO_TogglePin(DBG1_GPIO_Port, DBG1_Pin);
 
@@ -663,7 +467,7 @@ void DMA2_Stream2_IRQHandler()
     if (dma_bytes_left!=data_length_spi-1 && dma_bytes_left!=0) {
         // Reset_SPI1_DMA_Tx();
         // TODO: Add one-pulse timer to trigger interrupt to do a reset
-        logger.log("SPI transmit error with %d bytes left\n", dma_bytes_left);
+        main_logger.AddLog(SimpleNumLogger<1, uint32_t>("SPI transmit error with %d bytes left\n", {dma_bytes_left}));
     }
 }
 
@@ -691,7 +495,7 @@ void CAN1_RX0_IRQHandler()
     SET_BIT(CAN1->RF0R, CAN_RF0R_RFOM0); // Release FIFO
     can1_rx_counts++;
     if (transmitted_data[0]==0x19) {
-        logger.log("Motor %d set zero position acknowledge received\n", stdId-0x141);
+        main_logger.AddLog(SimpleNumLogger<1, uint32_t>("Motor %d set zero position acknowledge received\n", {stdId-0x141}));
         return;
     }
     if (transmitted_data[0]!=0x9c && ((transmitted_data[0]<0xa1) || (transmitted_data[0]>0xa4)) && transmitted_data[0]!=0x92)
@@ -701,8 +505,8 @@ void CAN1_RX0_IRQHandler()
     }
 
     if (can1_rx_counts%300==0) {
-        logger.log("CAN1 Total rx count: %d, 1: %d, 2: %d, 3: %d\n", can1_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
-                motor_rx_counts[2]);
+        main_logger.AddLog(SimpleNumLogger<4, uint32_t>("CAN1 Total rx count: %d, 1: %d, 2: %d, 3: %d\n", {can1_rx_counts, motor_rx_counts[0], motor_rx_counts[1],
+                motor_rx_counts[2]}));
     }
 
 
@@ -714,7 +518,7 @@ void CAN1_RX0_IRQHandler()
         motors[index].UpdateEncoderVal(feedback.EncoderPos);
         motor_feedback_full.Feedbacks[index].Angle = motors[index].GetOutputAngleRad();
         motor_feedback_full.Feedbacks[index].Torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[index].Velocity = static_cast<float>(feedback.Speed/motors[index].gear_ratio_*deg_to_rad);
+        motor_feedback_full.Feedbacks[index].Velocity = static_cast<float>(feedback.Speed/motors[index].GetGearRatio()*deg_to_rad);
         motor_feedback_full.Feedbacks[index].Temperature = feedback.Temperature;
         switch (stdId) { // NOLINT(hicpp-multiway-paths-covered)
         case 0x141:
@@ -731,8 +535,8 @@ void CAN1_RX0_IRQHandler()
         motor_rx_counts[index]++;
     }
     if (can1_rx_counts%300==0) {
-        logger.log("P1: %f, P2: %f, P3: %f\n", motors[0].GetOutputAngleRad(), motors[1].GetOutputAngleRad(),
-                motors[2].GetOutputAngleRad());
+        main_logger.AddLog(SimpleNumLogger<3, float>("P1: %f, P2: %f, P3: %f\n", {motors[0].GetOutputAngleRad(), motors[1].GetOutputAngleRad(),
+                motors[2].GetOutputAngleRad()}));
     }
 }
 
@@ -745,51 +549,51 @@ void CAN2_RX0_IRQHandler()
     *reinterpret_cast<uint32_t*>(&transmitted_data[4]) = CAN2->sFIFOMailBox[0].RDHR;
 
     SET_BIT(CAN2->RF0R, CAN_RF0R_RFOM0); // Release FIFO
-    can2_rx_counts++;
-    if (transmitted_data[0]==0x19) {
-        logger.log("Motor %d set zero position acknowledge received\n", stdId-0x141+3);
-        return;
-    }
-    if (transmitted_data[0]!=0x9c && ((transmitted_data[0]<0xa1) || (transmitted_data[0]>0xa4)) && transmitted_data[0]!=0x92)
-        return;
-    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
-        motor_rx_counts[stdId-0x141+3]++;
-    }
-
-    if (can2_rx_counts%300==0) {
-        logger.log("Total CAN rx count: %d, 1: %d, 2: %d, 3: %d\n", can2_rx_counts, motor_rx_counts[3], motor_rx_counts[4],
-                motor_rx_counts[5]);
-    }
-
-
-    // We parse for command feedback if the return is in this format (if it is any other command it should've returned by this point)
-    MotorFeedbackRaw feedback; // NOLINT(cppcoreguidelines-pro-type-member-init)
-    std::memcpy(&feedback, transmitted_data.data(), 8);
-    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
-        auto index = stdId-0x141+3;
-        motors[index].UpdateEncoderVal(feedback.EncoderPos);
-        motor_feedback_full.Feedbacks[index].Angle = motors[index].GetOutputAngleRad();
-        motor_feedback_full.Feedbacks[index].Torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
-        motor_feedback_full.Feedbacks[index].Velocity = static_cast<float>(feedback.Speed/motors[index].gear_ratio_*deg_to_rad);
-        motor_feedback_full.Feedbacks[index].Temperature = feedback.Temperature;
-        switch (stdId) { // NOLINT(hicpp-multiway-paths-covered)
-        case 0x141:
-            motor_feedback_full.status.Motor4Ready = true;
-            break;
-        case 0x142:
-            motor_feedback_full.status.Motor5Ready = true;
-            break;
-        case 0x143:
-            motor_feedback_full.status.Motor6Ready = true;
-            break;
-        }
-        motor_feedback_full.GenerateCRC();
-        motor_rx_counts[index]++;
-    }
-    if (can2_rx_counts%300==0) {
-        logger.log("P4: %f, P5: %f, P6: %f\n", motors[4].GetOutputAngleRad(), motors[5].GetOutputAngleRad(),
-                motors[6].GetOutputAngleRad());
-    }
+//    can2_rx_counts++;
+//    if (transmitted_data[0]==0x19) {
+//        logger.log("Motor %d set zero position acknowledge received\n", stdId-0x141+3);
+//        return;
+//    }
+//    if (transmitted_data[0]!=0x9c && ((transmitted_data[0]<0xa1) || (transmitted_data[0]>0xa4)) && transmitted_data[0]!=0x92)
+//        return;
+//    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
+//        motor_rx_counts[stdId-0x141+3]++;
+//    }
+//
+//    if (can2_rx_counts%300==0) {
+//        logger.log("Total CAN rx count: %d, 1: %d, 2: %d, 3: %d\n", can2_rx_counts, motor_rx_counts[3], motor_rx_counts[4],
+//                motor_rx_counts[5]);
+//    }
+//
+//
+//    // We parse for command feedback if the return is in this format (if it is any other command it should've returned by this point)
+//    MotorFeedbackRaw feedback; // NOLINT(cppcoreguidelines-pro-type-member-init)
+//    std::memcpy(&feedback, transmitted_data.data(), 8);
+//    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
+//        auto index = stdId-0x141+3;
+//        motors[index].UpdateEncoderVal(feedback.EncoderPos);
+//        motor_feedback_full.Feedbacks[index].Angle = motors[index].GetOutputAngleRad();
+//        motor_feedback_full.Feedbacks[index].Torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
+//        motor_feedback_full.Feedbacks[index].Velocity = static_cast<float>(feedback.Speed/motors[index].GetGearRatio()*deg_to_rad);
+//        motor_feedback_full.Feedbacks[index].Temperature = feedback.Temperature;
+//        switch (stdId) { // NOLINT(hicpp-multiway-paths-covered)
+//        case 0x141:
+//            motor_feedback_full.status.Motor4Ready = true;
+//            break;
+//        case 0x142:
+//            motor_feedback_full.status.Motor5Ready = true;
+//            break;
+//        case 0x143:
+//            motor_feedback_full.status.Motor6Ready = true;
+//            break;
+//        }
+//        motor_feedback_full.GenerateCRC();
+//        motor_rx_counts[index]++;
+//    }
+//    if (can2_rx_counts%300==0) {
+//        logger.log("P4: %f, P5: %f, P6: %f\n", motors[4].GetOutputAngleRad(), motors[5].GetOutputAngleRad(),
+//                motors[6].GetOutputAngleRad());
+//    }
 }
 
 // USART1 TX DMA Stream (Logger use)
@@ -799,10 +603,9 @@ void DMA2_Stream7_IRQHandler()
     SET_BIT(DMA2->HIFCR, DMA_HIFCR_CTCIF7 | DMA_HIFCR_CHTIF7 | DMA_HIFCR_CTEIF7 | DMA_HIFCR_CFEIF7 | DMA_HIFCR_CDMEIF7);
     CLEAR_BIT(USART1->CR3, USART_CR3_DMAT);
 
-    if (logger.get_num_unprocessed()>0) {
-        auto buf = logger.get_next_unprocessed_buf();
-        DMA2_Stream7->NDTR = buf.size();
-        DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf.data());
+    if (auto buf = LogCharBuffer.GetNextUnprocessedBuf();buf != std::nullopt) {
+        DMA2_Stream7->NDTR = buf->size();
+        DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf->data());
         DMA2_Stream7->CR |= DMA_SxCR_EN;
         USART1->CR3 |= USART_CR3_DMAT;
     }
@@ -850,11 +653,11 @@ void TIM8_UP_TIM13_IRQHandler()
         bool can1_tsr_busy = false;
         bool can2_tsr_busy = false;
         if ((CAN1->TSR & 0b111 << 26)!=0b111 << 26) {
-            logger.log("(Watchdog)CAN1 TSR busy, check connection\n");
+            main_logger.AddLog(TextLogger("(Watchdog)CAN1 TSR busy, check connection\n"));
             can1_tsr_busy = true;
         }
         if ((CAN2->TSR & 0b111 << 26)!=0b111 << 26) {
-            logger.log("(Watchdog)CAN2 TSR busy, check connection\n");
+            main_logger.AddLog(TextLogger("(Watchdog)CAN2 TSR busy, check connection\n"));
             can2_tsr_busy = true;
         }
         if (can1_tsr_busy && can2_tsr_busy)
@@ -979,10 +782,10 @@ int main()
         // If DMA stream not enabled (finished processing) and still have logging data to process, then start the logging process
         // The DMA complete interrupt will trigger more logging until the logger's buffer is completed
         // Check DMA2_Stream7_IRQHandler for the continuation of the logging process
-        if (logger.get_num_unprocessed()>0 && !(DMA2_Stream7->CR & DMA_SxCR_EN)) {
-            auto buf = logger.get_next_unprocessed_buf();
-            DMA2_Stream7->NDTR = buf.size();
-            DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf.data());
+        main_logger.ProcessLog([](std::span<char> data){LogCharBuffer.InsertCharBuf(data);});
+        if (auto buf = LogCharBuffer.GetNextUnprocessedBuf(); buf != std::nullopt && !(DMA2_Stream7->CR & DMA_SxCR_EN)) {
+            DMA2_Stream7->NDTR = buf->size();
+            DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf->data());
             DMA2_Stream7->CR |= DMA_SxCR_EN;
             USART1->CR3 |= USART_CR3_DMAT;
         }
@@ -1096,5 +899,3 @@ void assert_failed(uint8_t *file, uint32_t line)
 #endif /* USE_FULL_ASSERT */
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
-
-#pragma clang diagnostic pop
