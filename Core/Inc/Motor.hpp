@@ -25,7 +25,7 @@ public:
         return gear_ratio_;
     };
 
-    [[nodiscard]] std::array<uint8_t, 8> GetCommand(const MotorCommandSingle& cmd) const;
+    [[nodiscard]] std::array<uint8_t, 8> GetCommand(const MotorCommandSingle& cmd, unsigned index, uint32_t message_id) const;
 
     void SetConfig(const MotorConfigSingle& config, int index, uint32_t message_id);
 

@@ -400,7 +400,7 @@ void DMA2_Stream2_IRQHandler()
                         continue;
                     }
                 }
-                auto can_cmd = motors.at(i).GetCommand(cmd_message.MotorCommands.at(i));
+                auto can_cmd = motors.at(i).GetCommand(cmd_message.MotorCommands.at(i), i, cmd_message.MessageId);
                 switch (i) {
                 case 0:
                 case 1:
@@ -617,8 +617,6 @@ void TIM6_DAC_IRQHandler()
     if (READ_BIT(TIM6->SR, TIM_SR_UIF)) {
         CLEAR_BIT(TIM6->SR, TIM_SR_UIF);
         CAN1->sTxMailBox[2].TIR |= CAN_TI0R_TXRQ;
-        LL_GPIO_TogglePin(LED2_GPIO_Port, LED2_Pin);
-        LL_GPIO_TogglePin(DBG2_GPIO_Port, DBG2_Pin);
     }
 }
 
@@ -782,7 +780,9 @@ int main()
         // If DMA stream not enabled (finished processing) and still have logging data to process, then start the logging process
         // The DMA complete interrupt will trigger more logging until the logger's buffer is completed
         // Check DMA2_Stream7_IRQHandler for the continuation of the logging process
+        LL_GPIO_TogglePin(DBG2_GPIO_Port, DBG2_Pin);
         main_logger.ProcessLog([](std::span<char> data){LogCharBuffer.InsertCharBuf(data);});
+        LL_GPIO_TogglePin(DBG2_GPIO_Port, DBG2_Pin);
         if (auto buf = LogCharBuffer.GetNextUnprocessedBuf(); buf != std::nullopt && !(DMA2_Stream7->CR & DMA_SxCR_EN)) {
             DMA2_Stream7->NDTR = buf->size();
             DMA2_Stream7->M0AR = reinterpret_cast<uintptr_t>(buf->data());

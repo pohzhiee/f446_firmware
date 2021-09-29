@@ -5,7 +5,7 @@
 
 class CharBuffer {
 public:
-    static constexpr unsigned BufLen = 32;
+    static constexpr unsigned BufLen = 72;
     static constexpr unsigned BufSize = 128;
     void InsertCharBuf(std::span<char> data)
     {
@@ -19,7 +19,7 @@ public:
 
     std::optional<std::span<char>> GetNextUnprocessedBuf()
     {
-        if(total_processed_ >=total_inserted_)
+        if (total_processed_>=total_inserted_)
             return std::nullopt;
 
         std::span<char> buf(buffer_[next_process_index_].data(), buffer_sizes_[next_process_index_]);
@@ -29,8 +29,9 @@ public:
             next_process_index_ = 0;
         return buf;
     }
-    bool CheckIfNeedProcessing(){
-        if(total_processed_ >=total_inserted_)
+    bool CheckIfNeedProcessing()
+    {
+        if (total_processed_>=total_inserted_)
             return false;
         return true;
     }
@@ -43,7 +44,6 @@ private:
     std::array<int, BufLen> buffer_sizes_{};
 };
 
-static const unsigned BufferSize = 64;
 class ILog {
 public:
     virtual int Log(char*) = 0;
@@ -51,14 +51,16 @@ public:
 
 class Logger {
 public:
-    static const unsigned BufLen = 32;
+    static const unsigned BufLen = 72;
+    static const unsigned BufferSize = 160;
 
-    using InsertCharBufFunc = void(*)(std::span<char>);
-    template <typename T>
-    void AddLog(T data){
+    using InsertCharBufFunc = void (*)(std::span<char>);
+    template<typename T>
+    void AddLog(T data)
+    {
         static_assert(std::is_base_of_v<ILog, T>);
         auto current_buf_ptr = buffer_[next_log_index].data();
-        new (current_buf_ptr) T(std::move(data));
+        new(current_buf_ptr) T(std::move(data));
         next_log_index++;
         total_inserted_++;
         if (next_log_index>=BufLen)
@@ -69,7 +71,7 @@ public:
     {
 //        assert(total_inserted_ - total_processed_ < BufLen);
 
-        while(total_inserted_ > total_processed_) {
+        while (total_inserted_>total_processed_) {
             char a[CharBuffer::BufSize];
             int size = reinterpret_cast<ILog*>(buffer_[next_process_index].data())->Log(a);
             func(std::span(a, size));
@@ -79,12 +81,6 @@ public:
                 next_process_index = 0;
         }
     };
-
-    [[nodiscard]] uint8_t GetNumUnprocessed() const
-    {
-//        assert(total_inserted_ - total_processed_ < BufLen);
-        return total_inserted_ - total_processed_;
-    }
 private:
 
 private:
@@ -95,16 +91,18 @@ private:
     std::array<std::array<std::byte, BufferSize>, BufLen> buffer_{};
 };
 
-
-class CANLogger : ILog{
+class CANLogger: ILog {
 public:
-    CANLogger(std::array<uint8_t, 8> command, uint8_t index, double raw_data) : command_(command), index_(index), raw_data_(raw_data){};
-    int Log(char* buf) override{
+    CANLogger(std::array<uint8_t, 8> command, uint8_t index, double raw_data) // NOLINT(cppcoreguidelines-pro-type-member-init)
+            :command_(command), index_(index), raw_data_(raw_data) { };
+    int Log(char* buf) override
+    {
         if (command_[0]==0xa4 || command_[0]==0xa2) {
             return sprintf(buf, "Cmd %d: %x, val: %ld\n", index_, command_[0], *reinterpret_cast<int32_t*>(&command_[4]));
         }
         else if (command_[0]==0xa1) {
-            return sprintf(buf, "Cmd %d: %x, val: %d, raw: %f\n", index_, command_[0], *reinterpret_cast<int16_t*>(&command_[4]), raw_data_);
+            return sprintf(buf, "Cmd %d: %x, val: %d, raw: %f\n", index_, command_[0], *reinterpret_cast<int16_t*>(&command_[4]),
+                    raw_data_);
         }
         else if (command_[0]==0x9c) {
             return sprintf(buf, "Cmd %d: %x\n", index_, command_[0]);
@@ -120,25 +118,48 @@ private:
 };
 
 template<unsigned N, typename T>
-class SimpleNumLogger : ILog{
+class SimpleNumLogger: ILog {
 public:
-    explicit SimpleNumLogger(const char *format_text, std::array<T, N> data) : data_(data){
+    explicit SimpleNumLogger(const char* format_text, std::array<T, N> data)
+            :data_(data)
+    {
         std::strcpy(format_text_.data(), format_text);
     };
-    int Log(char* buf) override{
+    int Log(char* buf) override
+    {
+        if constexpr(N==1) {
+            return sprintf(buf, format_text_.data(), data_[0]);
+        }
+        else if constexpr(N==2) {
+            return sprintf(buf, format_text_.data(), data_[0], data_[1]);
+        }
+        else if constexpr(N==3) {
+            return sprintf(buf, format_text_.data(), data_[0], data_[1], data_[2]);
+        }
+        else if constexpr(N==4) {
+            return sprintf(buf, format_text_.data(), data_[0], data_[1], data_[2], data_[3]);
+        }
+        else if constexpr(N==5) {
+            return sprintf(buf, format_text_.data(), data_[0], data_[1], data_[2], data_[3], data_[4]);
+        }
+        else if constexpr(N==6) {
+            return sprintf(buf, format_text_.data(), data_[0], data_[1], data_[2], data_[3], data_[4], data_[5]);
+        }
         return sprintf(buf, format_text_.data(), data_.data());
     }
 private:
-    std::array<T, N> data_;
+    std::array<T, N> data_{};
     std::array<char, 100> format_text_{};
 };
 
-class TextLogger : ILog{
+class TextLogger: ILog {
 public:
-    explicit TextLogger(const char* text) {
+    explicit TextLogger(const char* text)
+    {
         std::strcpy(text_.data(), text);
     };
-    int Log(char* buf) override{
+    int Log(char* buf) override
+    {
         return sprintf(buf, "%s", text_.data());
     }
 private:
