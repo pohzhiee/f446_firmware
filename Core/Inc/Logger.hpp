@@ -29,12 +29,6 @@ public:
             next_process_index_ = 0;
         return buf;
     }
-    bool CheckIfNeedProcessing()
-    {
-        if (total_processed_>=total_inserted_)
-            return false;
-        return true;
-    }
 private:
     uint8_t next_buf_index_{0};
     uint8_t next_process_index_{0};
@@ -93,28 +87,32 @@ private:
 
 class CANLogger: ILog {
 public:
-    CANLogger(std::array<uint8_t, 8> command, uint8_t index, double raw_data) // NOLINT(cppcoreguidelines-pro-type-member-init)
-            :command_(command), index_(index), raw_data_(raw_data) { };
+    CANLogger(std::array<uint8_t, 8> command, uint8_t index, double raw_data, // NOLINT(cppcoreguidelines-pro-type-member-init)
+            uint32_t message_id) // NOLINT(cppcoreguidelines-pro-type-member-init)
+            :command_(command), index_(index), raw_data_(raw_data), message_id_(message_id) { };
     int Log(char* buf) override
     {
-        if (command_[0]==0xa4 || command_[0]==0xa2) {
-            return sprintf(buf, "Cmd %d: %x, val: %ld\n", index_, command_[0], *reinterpret_cast<int32_t*>(&command_[4]));
+        if (command_[0]==0xa4 || command_[0]==0xa2) { // NOLINT(bugprone-branch-clone)
+            return sprintf(buf, "[%lu]Cmd %d: %x, val: %ld\n", message_id_, index_, command_[0],
+                    *reinterpret_cast<int32_t*>(&command_[4]));
         }
         else if (command_[0]==0xa1) {
-            return sprintf(buf, "Cmd %d: %x, val: %d, raw: %f\n", index_, command_[0], *reinterpret_cast<int16_t*>(&command_[4]),
+            return sprintf(buf, "[%lu]Cmd %d: %x, val: %d, raw: %f\n", message_id_, index_, command_[0],
+                    *reinterpret_cast<int16_t*>(&command_[4]),
                     raw_data_);
         }
         else if (command_[0]==0x9c) {
-            return sprintf(buf, "Cmd %d: %x\n", index_, command_[0]);
+            return sprintf(buf, "[%lu]Cmd %d: %x\n", message_id_, index_, command_[0]);
         }
         else {
-            return sprintf(buf, "Unsupported CAN command logged: %x, index: %d\n", command_[0], index_);
+            return sprintf(buf, "[%lu]Unsupported CAN command logged: %x, index: %d\n", message_id_, command_[0], index_);
         }
     };
 private:
     std::array<uint8_t, 8> command_;
     uint8_t index_;
     double raw_data_;
+    uint32_t message_id_;
 };
 
 template<unsigned N, typename T>
@@ -127,7 +125,7 @@ public:
     };
     int Log(char* buf) override
     {
-        if constexpr(N==1) {
+        if constexpr(N==1) { // NOLINT(bugprone-branch-clone)
             return sprintf(buf, format_text_.data(), data_[0]);
         }
         else if constexpr(N==2) {

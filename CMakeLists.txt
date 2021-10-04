@@ -1,6 +1,6 @@
 #THIS FILE IS AUTO GENERATED FROM THE TEMPLATE! DO NOT CHANGE!
-set(CMAKE_SYSTEM_NAME Generic)
-set(CMAKE_SYSTEM_VERSION 1)
+#set(CMAKE_SYSTEM_NAME Generic)
+#set(CMAKE_SYSTEM_VERSION 1)
 cmake_minimum_required(VERSION 3.19)
 
 # specify cross compilers and tools
@@ -30,11 +30,11 @@ add_compile_options(-mcpu=cortex-m4 -mthumb -mthumb-interwork)
 add_compile_options(-ffunction-sections -fdata-sections -fno-common -fmessage-length=0 -fno-exceptions -Wall)
 
 # uncomment to mitigate c++17 warnings
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-register -Wno-volatile")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-register -Wno-volatile -Wno-unknown-pragmas")
 
 if ("${CMAKE_BUILD_TYPE}" STREQUAL "Release")
     message(STATUS "Maximum optimization for speed")
-    add_compile_options(-Ofast)
+    add_compile_options(-O3)
 elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "RelWithDebInfo")
     message(STATUS "Maximum optimization for speed, debug info included")
     add_compile_options(-Ofast -g)
@@ -60,8 +60,9 @@ add_link_options(-T ${LINKER_SCRIPT})
 
 add_executable(${PROJECT_NAME}.elf ${SOURCES} ${LINKER_SCRIPT})
 
-set_property(TARGET ${PROJECT_NAME}.elf
-        PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+#set_property(TARGET ${PROJECT_NAME}.elf
+#        PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+# Somehow we will run into link issues with LTO enabled
 
 set(HEX_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex)
 set(BIN_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin)

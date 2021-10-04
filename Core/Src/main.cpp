@@ -19,51 +19,90 @@ constexpr int data_length_spi = 108;
 
 void SystemClock_Config();
 
-void Log_CAN_Command(std::array<uint8_t, 8>& can_command, uint8_t index, double raw_data)
+void Log_CAN_Command(std::array<uint8_t, 8>& can_command, uint8_t index, double raw_data, uint32_t message_id)
 {
-    main_logger.AddLog(CANLogger(can_command, index, raw_data));
+    main_logger.AddLog(CANLogger(can_command, index, raw_data, message_id));
 }
 
 /* ============================ Initialisation Code Begin ===================================*/
 std::array<Motor, 6> motors;
+
+void CAN2_Filters_Init()
+{
+    //Set initialisation flag
+    SET_BIT(CAN1->FMR, CAN_FMR_FINIT);
+
+    // Set 14 filter banks for CAN1 and 14 filter banks for CAN2
+    CAN1->FMR |= 14 << 8;
+
+    // deactivate filter bank 14, 15
+    CLEAR_BIT(CAN1->FA1R, CAN_FA1R_FACT14);
+    CLEAR_BIT(CAN1->FA1R, CAN_FA1R_FACT15);
+
+    // Set filter scale to 32 bit for bank 14, 15
+    SET_BIT(CAN1->FS1R, CAN_FS1R_FSC14);
+    SET_BIT(CAN1->FS1R, CAN_FS1R_FSC15);
+
+//     Set the IDs (assume is standard)
+    CAN1->sFilterRegister[14].FR1 = 0x141 << 21;
+    CAN1->sFilterRegister[14].FR2 = 0x142 << 21;
+    CAN1->sFilterRegister[15].FR1 = 0x143 << 21;
+    CAN1->sFilterRegister[15].FR2 = 0x144 << 21;
+
+    // // Set filter mode to list for bank 14, 15
+    SET_BIT(CAN1->FM1R, CAN_FM1R_FBM14);
+    SET_BIT(CAN1->FM1R, CAN_FM1R_FBM15);
+
+    // Set filter FIFO to FIFO0 for bank 14, 15
+    CLEAR_BIT(CAN1->FFA1R, CAN_FFA1R_FFA14);
+    CLEAR_BIT(CAN1->FFA1R, CAN_FFA1R_FFA15);
+
+    // Activate filter bank 14, 15
+    SET_BIT(CAN1->FA1R, CAN_FA1R_FACT14);
+    SET_BIT(CAN1->FA1R, CAN_FA1R_FACT15);
+
+    // Leave initialisation mode
+    CLEAR_BIT(CAN1->FMR, CAN_FMR_FINIT);
+}
+
 /**
  * The filters are configured in list mode over 2 filter banks, with 2 id being registered for each bank
  * This gives a total of 4 id's being allowed, which should correspond to a maximum of 4 distinct motors
  * The filter banks are configured to use FIFO0
  */
-void CAN_Filters_Init(CAN_TypeDef* CAN)
+void CAN1_Filters_Init()
 {
     //Set initialisation flag
-    SET_BIT(CAN->FMR, CAN_FMR_FINIT);
+    SET_BIT(CAN1->FMR, CAN_FMR_FINIT);
 
     // deactivate filter bank 0, 1
-    CLEAR_BIT(CAN->FA1R, CAN_FA1R_FACT0);
-    CLEAR_BIT(CAN->FA1R, CAN_FA1R_FACT1);
+    CLEAR_BIT(CAN1->FA1R, CAN_FA1R_FACT0);
+    CLEAR_BIT(CAN1->FA1R, CAN_FA1R_FACT1);
 
     // Set filter scale to 32 bit for bank 0, 1
-    SET_BIT(CAN->FS1R, CAN_FS1R_FSC0);
-    SET_BIT(CAN->FS1R, CAN_FS1R_FSC1);
+    SET_BIT(CAN1->FS1R, CAN_FS1R_FSC0);
+    SET_BIT(CAN1->FS1R, CAN_FS1R_FSC1);
 
 //     Set the IDs (assume is standard)
-    CAN->sFilterRegister[0].FR1 = 0x141 << 21;
-    CAN->sFilterRegister[0].FR2 = 0x142 << 21;
-    CAN->sFilterRegister[1].FR1 = 0x143 << 21;
-    CAN->sFilterRegister[1].FR2 = 0x144 << 21;
+    CAN1->sFilterRegister[0].FR1 = 0x141 << 21;
+    CAN1->sFilterRegister[0].FR2 = 0x142 << 21;
+    CAN1->sFilterRegister[1].FR1 = 0x143 << 21;
+    CAN1->sFilterRegister[1].FR2 = 0x144 << 21;
 
     // // Set filter mode to list for bank 0, 1
-    SET_BIT(CAN->FM1R, CAN_FM1R_FBM0);
-    SET_BIT(CAN->FM1R, CAN_FM1R_FBM1);
+    SET_BIT(CAN1->FM1R, CAN_FM1R_FBM0);
+    SET_BIT(CAN1->FM1R, CAN_FM1R_FBM1);
 
     // Set filter FIFO to FIFO0 for bank 0, 1
-    CLEAR_BIT(CAN->FFA1R, CAN_FFA1R_FFA0);
-    CLEAR_BIT(CAN->FFA1R, CAN_FFA1R_FFA1);
+    CLEAR_BIT(CAN1->FFA1R, CAN_FFA1R_FFA0);
+    CLEAR_BIT(CAN1->FFA1R, CAN_FFA1R_FFA1);
 
     // Activate filter bank 0, 1
-    SET_BIT(CAN->FA1R, CAN_FA1R_FACT0);
-    SET_BIT(CAN->FA1R, CAN_FA1R_FACT1);
+    SET_BIT(CAN1->FA1R, CAN_FA1R_FACT0);
+    SET_BIT(CAN1->FA1R, CAN_FA1R_FACT1);
 
     // Leave initialisation mode
-    CLEAR_BIT(CAN->FMR, CAN_FMR_FINIT);
+    CLEAR_BIT(CAN1->FMR, CAN_FMR_FINIT);
 }
 
 void CAN_Init(CAN_TypeDef* CAN)
@@ -90,7 +129,12 @@ void CAN_Init(CAN_TypeDef* CAN)
     CAN->BTR = (9-1) | (3-1) << 16 | (1-1) << 20 | (1-1) << 24;
 
     // Setup filters
-    CAN_Filters_Init(CAN);
+    if(CAN == CAN1){
+        CAN1_Filters_Init();
+    }
+    else if(CAN == CAN2){
+        CAN2_Filters_Init();
+    }
 
     /* Request leave initialisation */
     CLEAR_BIT(CAN->MCR, CAN_MCR_INRQ);
@@ -118,7 +162,7 @@ void CAN1_CAN2_Init()
     GPIO_InitStruct.Alternate = LL_GPIO_AF_9;
     LL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // Initialise CAN1 GPIO PB12, PB13, AF9
+    // Initialise CAN2 GPIO PB12, PB13, AF9
     GPIO_InitStruct = {0};
     GPIO_InitStruct.Pin = LL_GPIO_PIN_12 | LL_GPIO_PIN_13;
     GPIO_InitStruct.Mode = LL_GPIO_MODE_ALTERNATE;
@@ -375,16 +419,6 @@ void DMA2_Stream2_IRQHandler()
                 main_logger.AddLog(TextLogger("Fatal error, determined is normal motor command but actually not. Please check\n"));
                 return;
             }
-//            bool CAN1_TSR_Busy = false;
-//            bool CAN2_TSR_Busy = false;
-//            if ((CAN1->TSR & 0b111 << 26)!=0b111 << 26) {
-//                logger.log("CAN1 TSR busy, msg id: %lu\n", cmd_message.MessageId);
-//                CAN1_TSR_Busy = true;
-//            }
-//            if ((CAN2->TSR & 0b111 << 26)!=0b111 << 26) {
-//                logger.log("CAN2 TSR busy, msg id: %lu\n", cmd_message.MessageId);
-//                CAN2_TSR_Busy = true;
-//            }
             for (unsigned i = 0; i<6; i++) {
                 if (cmd_message.MotorCommands.at(i).CommandMode==MotorCommandMode::Ignore)
                     continue;
@@ -427,10 +461,10 @@ void DMA2_Stream2_IRQHandler()
                 default:
                     break;
                 }
-                if (motor_command_count%100==0) {
+                if (motor_command_count%20==0) {
                     double param;
                     std::memcpy(&param, cmd_message.MotorCommands[i].Param.data(), sizeof(double));
-                    Log_CAN_Command(can_cmd, i, param);
+                    Log_CAN_Command(can_cmd, i, param, cmd_message.MessageId);
                 }
             }
         }();
@@ -534,7 +568,7 @@ void CAN1_RX0_IRQHandler()
         motor_feedback_full.GenerateCRC();
         motor_rx_counts[index]++;
     }
-    if (can1_rx_counts%300==0) {
+    if (can1_rx_counts%100==0) {
         main_logger.AddLog(SimpleNumLogger<3, float>("P1: %f, P2: %f, P3: %f\n", {motors[0].GetOutputAngleRad(), motors[1].GetOutputAngleRad(),
                 motors[2].GetOutputAngleRad()}));
     }
@@ -547,53 +581,53 @@ void CAN2_RX0_IRQHandler()
     std::array<uint8_t, 8> transmitted_data{};
     *reinterpret_cast<uint32_t*>(&transmitted_data[0]) = CAN2->sFIFOMailBox[0].RDLR;
     *reinterpret_cast<uint32_t*>(&transmitted_data[4]) = CAN2->sFIFOMailBox[0].RDHR;
-
+    auto motorId = stdId -0x141 + 3;
     SET_BIT(CAN2->RF0R, CAN_RF0R_RFOM0); // Release FIFO
-//    can2_rx_counts++;
-//    if (transmitted_data[0]==0x19) {
-//        logger.log("Motor %d set zero position acknowledge received\n", stdId-0x141+3);
-//        return;
-//    }
-//    if (transmitted_data[0]!=0x9c && ((transmitted_data[0]<0xa1) || (transmitted_data[0]>0xa4)) && transmitted_data[0]!=0x92)
-//        return;
-//    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
-//        motor_rx_counts[stdId-0x141+3]++;
-//    }
-//
-//    if (can2_rx_counts%300==0) {
-//        logger.log("Total CAN rx count: %d, 1: %d, 2: %d, 3: %d\n", can2_rx_counts, motor_rx_counts[3], motor_rx_counts[4],
-//                motor_rx_counts[5]);
-//    }
-//
-//
-//    // We parse for command feedback if the return is in this format (if it is any other command it should've returned by this point)
-//    MotorFeedbackRaw feedback; // NOLINT(cppcoreguidelines-pro-type-member-init)
-//    std::memcpy(&feedback, transmitted_data.data(), 8);
-//    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
-//        auto index = stdId-0x141+3;
-//        motors[index].UpdateEncoderVal(feedback.EncoderPos);
-//        motor_feedback_full.Feedbacks[index].Angle = motors[index].GetOutputAngleRad();
-//        motor_feedback_full.Feedbacks[index].Torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
-//        motor_feedback_full.Feedbacks[index].Velocity = static_cast<float>(feedback.Speed/motors[index].GetGearRatio()*deg_to_rad);
-//        motor_feedback_full.Feedbacks[index].Temperature = feedback.Temperature;
-//        switch (stdId) { // NOLINT(hicpp-multiway-paths-covered)
-//        case 0x141:
-//            motor_feedback_full.status.Motor4Ready = true;
-//            break;
-//        case 0x142:
-//            motor_feedback_full.status.Motor5Ready = true;
-//            break;
-//        case 0x143:
-//            motor_feedback_full.status.Motor6Ready = true;
-//            break;
-//        }
-//        motor_feedback_full.GenerateCRC();
-//        motor_rx_counts[index]++;
-//    }
-//    if (can2_rx_counts%300==0) {
-//        logger.log("P4: %f, P5: %f, P6: %f\n", motors[4].GetOutputAngleRad(), motors[5].GetOutputAngleRad(),
-//                motors[6].GetOutputAngleRad());
-//    }
+    can2_rx_counts++;
+    if (transmitted_data[0]==0x19) {
+        main_logger.AddLog(SimpleNumLogger<1, uint32_t>("Motor %d set zero position acknowledge received\n", {motorId}));
+        return;
+    }
+    if (transmitted_data[0]!=0x9c && ((transmitted_data[0]<0xa1) || (transmitted_data[0]>0xa4)) && transmitted_data[0]!=0x92)
+        return;
+    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
+        motor_rx_counts[motorId]++;
+    }
+
+    if (can2_rx_counts%300==0) {
+        main_logger.AddLog(SimpleNumLogger<4, uint32_t>("CAN2 Total rx count: %d, 4: %d, 5: %d, 6: %d\n", {can2_rx_counts, motor_rx_counts[3], motor_rx_counts[4],
+                                                                                                           motor_rx_counts[5]}));
+    }
+
+
+    // We parse for command feedback if the return is in this format (if it is any other command it should've returned by this point)
+    MotorFeedbackRaw feedback; // NOLINT(cppcoreguidelines-pro-type-member-init)
+    std::memcpy(&feedback, transmitted_data.data(), 8);
+    if (stdId==0x141 || stdId==0x142 || stdId==0x143) {
+        auto index = motorId;
+        motors[index].UpdateEncoderVal(feedback.EncoderPos);
+        motor_feedback_full.Feedbacks[index].Angle = motors[index].GetOutputAngleRad();
+        motor_feedback_full.Feedbacks[index].Torque = (float)feedback.TorqueCurrentRaw/2048.0f*33.0f;
+        motor_feedback_full.Feedbacks[index].Velocity = static_cast<float>(feedback.Speed/motors[index].GetGearRatio()*deg_to_rad);
+        motor_feedback_full.Feedbacks[index].Temperature = feedback.Temperature;
+        switch (stdId) { // NOLINT(hicpp-multiway-paths-covered)
+        case 0x141:
+            motor_feedback_full.status.Motor4Ready = true;
+            break;
+        case 0x142:
+            motor_feedback_full.status.Motor5Ready = true;
+            break;
+        case 0x143:
+            motor_feedback_full.status.Motor6Ready = true;
+            break;
+        }
+        motor_feedback_full.GenerateCRC();
+        motor_rx_counts[index]++;
+    }
+    if (can2_rx_counts%100==0) {
+        main_logger.AddLog(SimpleNumLogger<3, float>("P4: %f, P5: %f, P6: %f\n", {motors[3].GetOutputAngleRad(), motors[4].GetOutputAngleRad(),
+                                                                                  motors[5].GetOutputAngleRad()}));
+    }
 }
 
 // USART1 TX DMA Stream (Logger use)
